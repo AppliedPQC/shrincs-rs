@@ -182,15 +182,6 @@ known-answer tests do not apply. `tests/suites.rs` asserts the non-interoperabil
 rather than leaving it to be assumed: same seed and shape give different keys, and
 a signature made under one suite fails under the other.
 
-## Against the C++ implementation
-
-[`comparison/`](comparison/) reproduces a same-machine measurement against
-`BlockstreamResearch/shrincs-cpp`, which implements an earlier design — `w = 256`
-over 16 chains with PORS+FP, where the draft specifies `w = 16` over 32 chains
-with FORS. The older design is smaller and slower, the draft's parameters larger
-and faster, which is the trade the working group described. The numbers cannot
-separate parameter choice from implementation effort, and the directory says so.
-
 ## Layout
 
 | Module | Contents |
