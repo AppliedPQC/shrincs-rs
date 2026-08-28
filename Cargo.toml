@@ -16,6 +16,10 @@ blake3 = { version = "1", optional = true, default-features = false }
 [features]
 default = []
 # BLAKE3 as an alternative suite. Not SHRINCS; see hash::Blake3.
+#
+# Raises the minimum Rust version above the one declared here: blake3 pulls
+# cpufeatures 0.3, which is edition 2024 and needs 1.85 or later. rust-version
+# above describes the default build.
 blake3 = ["dep:blake3"]
 
 [dev-dependencies]

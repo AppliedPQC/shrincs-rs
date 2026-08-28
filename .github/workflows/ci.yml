@@ -57,15 +57,15 @@ jobs:
       # the default build never sees.
       - name: Lints
         run: |
-          cargo clippy --all-targets
-          cargo clippy --all-targets --features blake3
+          cargo clippy --all-targets --locked
+          cargo clippy --all-targets --locked --features blake3
 
       # Release, because signing at these parameters is minutes rather than
       # seconds without optimisation.
       - name: Tests
         run: |
-          cargo test --release
-          cargo test --release --features blake3
+          cargo test --release --locked
+          cargo test --release --locked --features blake3
 
   msrv:
     name: Minimum supported Rust version
@@ -79,7 +79,13 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       # A build, not a test run: the claim is that the crate compiles there.
-      - run: cargo check --all-targets --features blake3
+      #
+      # Default features only. The optional blake3 suite is not covered by the
+      # version the manifest declares: blake3 pulls cpufeatures 0.3, which is
+      # edition 2024 and so needs 1.85 or later. The crate's own code and its
+      # one required dependency are within the declared version, and that is
+      # what this job pins.
+      - run: cargo check --all-targets --locked
 
   nist:
     name: NIST ACVP vectors
@@ -117,7 +123,7 @@ jobs:
           done
 
       - name: Cross-check against NIST
-        run: cargo test --release --test acvp -- --nocapture
+        run: cargo test --release --locked --test acvp -- --nocapture
 
   interop:
     name: Cross-verification against the draft
