@@ -169,7 +169,10 @@ root, are that scheme.
 The construction itself does not depend on SHA-256, so the primitive sits behind
 a trait. A suite supplies a digest, a keyed mode, and how much padding follows
 the seed; the nine named functions of the draft are derived from those once.
-BLAKE3 is included behind the `blake3` feature as a second instantiation.
+BLAKE3 is included behind the `blake3` feature as a second instantiation. That
+feature needs a newer Rust than the crate otherwise does, since blake3 pulls a
+dependency on edition 2024; `rust-version` in the manifest describes the default
+build.
 
 ```rust
 use shrincs::{Shrincs, Shrincs256, hash::Sha256};
