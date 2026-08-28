@@ -182,18 +182,57 @@ known-answer tests do not apply. `tests/suites.rs` asserts the non-interoperabil
 rather than leaving it to be assumed: same seed and shape give different keys, and
 a signature made under one suite fails under the other.
 
-## Layout
+## Performance
 
-| Module | Contents |
-|---|---|
-| `params` | Every constant, derived from its defining equation where there is one |
-| `adrs` | The 22-byte address that makes each hash call a distinct function |
-| `hash` | The tweakable hash family, all SHA-256 |
-| `wots` | WOTS-TW (checksum) and WOTS+C (constant sum) |
-| `fxmss` | The variable-shape stateful tree and its shape-agnostic verifier |
-| `stateless` | XMSS, the hypertree, FORS, and SLH-DSA over them |
+`cargo run --release --example bench`. Signing and key generation are timed
+once, verification over 200 iterations, since verification is the operation
+every node runs and is fast enough that a single sample is noise.
 
-`hash::HashSuite` is the trait; `hash::Sha256` is the specified instantiation.
+Measured on an Intel Xeon Platinum, 4 vCPU with 2 threads per core, 14 GB of
+memory, Ubuntu 24.04.3 with kernel 6.8, `rustc` 1.98.0 targeting
+`x86_64-unknown-linux-gnu`. A shared cloud vCPU rather than a dedicated core,
+which is worth knowing when comparing against numbers from bare metal.
+
+| Configuration | Budget | Signature | Key generation | Signing | Verification |
+|---|---|---|---|---|---|
+| UXMSS d=8 | 9 | 548 B | 220 ms | 4 ms | 0.18 ms |
+| UXMSS d=255 | 256 | 548 B | 310 ms | 98 ms | 0.18 ms |
+| BXMSS d=5 | 32 | 612 B | 225 ms | 12 ms | 0.18 ms |
+| BXMSS d=8 | 256 | 660 B | 310 ms | 98 ms | 0.19 ms |
+| BXMSS d=10 | 1,024 | 693 B | 600 ms | 390 ms | 0.19 ms |
+| stateless fallback | 2⁴⁰ | 5,777 B | — | 1,240 ms | 1.10 ms |
+| deepest stateful leaf | — | 4,619 B | — | — | 0.37 ms |
+
+Sizes and budgets are exact. Timings are medians of three runs, rounded to the
+run-to-run spread of a few percent.
+
+Three things this shows.
+
+**Verification barely moves with shape.** About 0.18 ms across every stateful
+configuration, because the constant-sum encoding fixes the chain work at 240
+steps whatever the message, and only the Merkle path grows with depth. The
+deepest leaf carries 4,619 bytes against 548, eight times the signature, and
+costs roughly twice as much to verify rather than eight times. This is the
+property consensus needs: the worst case sits close to the typical one, so it
+can be priced without pricing for a rare disaster.
+
+**Key generation is dominated by the component you did not choose.** UXMSS d=255
+builds 256 stateful leaves where d=8 builds nine, yet costs 310 ms against 220.
+Every key pair also builds the stateless root, whose top XMSS tree is 512
+WOTS-TW leaves, and that is the larger part of the work in every row above. The
+stateful shape is close to free at key generation until it gets deep.
+
+**The fallback is the expensive one, and only when it is used.** Signing it takes
+about a second, three times the slowest stateful signing measured here and some
+hundreds of times the cheapest, and verifying it costs six times a stateful
+signature. That is the
+price of losing the state counter, and it is paid per fallback signature rather
+than continuously.
+
+Timings are from one machine and are meant for the ratios between rows, not as
+absolutes. This is a reference implementation: it is naive by intent, allocates
+freely, and does no precomputation of the cached seed block that the padding in
+every tweakable hash exists to permit.
 
 ## Licence
 
