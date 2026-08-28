@@ -53,3 +53,82 @@ pub const FXMSS_SIGNATURE_SIZE_MIN: usize = 2 + WOTS_C_CHAINS_SIZE + N; // 530
 pub const FXMSS_SIGNATURE_SIZE_MAX: usize = 2 + WOTS_C_CHAINS_SIZE + 255 * N; // 4594
 pub const SF_SIGNATURE_SIZE_MIN: usize = 1 + N + 1 + FXMSS_SIGNATURE_SIZE_MIN; // 548
 pub const SF_SIGNATURE_SIZE_MAX: usize = 1 + N + 8 + FXMSS_SIGNATURE_SIZE_MAX; // 4619
+
+/// The parameters of an SLH-DSA instantiation.
+///
+/// SHRINCS's stateless component is FIPS 205 under a non-standard set, which
+/// is the draft's central reuse claim. Making the set a value rather than a
+/// constant lets the same code be instantiated at the *standard* sets too, and
+/// so be checked against NIST's own test vectors. See `tests/acvp.rs`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SlhParams {
+    pub name: &'static str,
+    /// Hypertree layers, `d`.
+    pub d: usize,
+    /// Height of one XMSS tree, `h'`.
+    pub h_prime: usize,
+    /// FORS tree height, `a`.
+    pub a: usize,
+    /// FORS tree count, `k`.
+    pub k: usize,
+}
+
+impl SlhParams {
+    /// Total hypertree height, `h = d * h'`.
+    pub const fn h(&self) -> usize {
+        self.d * self.h_prime
+    }
+    /// Digest bytes feeding FORS: `ceil(k*a/8)`.
+    pub const fn fors_digest_size(&self) -> usize {
+        (self.k * self.a).div_ceil(8)
+    }
+    /// Bits of digest that select a bottom-layer XMSS tree, `h - h'`.
+    pub const fn tree_index_bits(&self) -> usize {
+        self.h() - self.h_prime
+    }
+    /// The message digest length `m`, in bytes.
+    pub const fn m(&self) -> usize {
+        self.fors_digest_size() + self.tree_index_bits().div_ceil(8) + self.h_prime.div_ceil(8)
+    }
+    pub const fn fors_signature_size(&self) -> usize {
+        self.k * (self.a + 1) * N
+    }
+    pub const fn xmss_signature_size(&self) -> usize {
+        WOTS_TW_CHAINS_SIZE + self.h_prime * N
+    }
+    pub const fn signature_size(&self) -> usize {
+        N + self.fors_signature_size() + self.d * self.xmss_signature_size()
+    }
+    /// Signature budget, `2^h`.
+    pub const fn budget_log2(&self) -> usize {
+        self.h()
+    }
+}
+
+/// The set SHRINCS chooses for its fallback: 2^40 signatures, 5,776 bytes.
+pub const SHRINCS_SL: SlhParams = SlhParams {
+    name: "SHRINCS-SL",
+    d: SPHX_LAYER_COUNT,
+    h_prime: SPHX_XMSS_HEIGHT,
+    a: SPHX_FORS_HEIGHT,
+    k: SPHX_FORS_COUNT,
+};
+
+/// SLH-DSA-SHA2-128s, FIPS 205 Table 2. Not used by SHRINCS; present so that
+/// the shared machinery can be checked against NIST's vectors.
+pub const SLH_DSA_SHA2_128S: SlhParams = SlhParams {
+    name: "SLH-DSA-SHA2-128s",
+    d: 7,
+    h_prime: 9,
+    a: 12,
+    k: 14,
+};
+
+/// SLH-DSA-SHA2-128f, FIPS 205 Table 2.
+pub const SLH_DSA_SHA2_128F: SlhParams = SlhParams {
+    name: "SLH-DSA-SHA2-128f",
+    d: 22,
+    h_prime: 3,
+    a: 6,
+    k: 33,
+};

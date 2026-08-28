@@ -125,14 +125,30 @@ pub trait HashSuite {
         truncate(Self::mac(&key, &parts))
     }
 
-    /// Stateless message digest. It takes its own root as a parameter; the
-    /// caller passes the *stateful* root inside `m`. That asymmetry is the
-    /// cross-binding, and it is why neither component can be used alone.
-    fn h_msg_sl(r: &[u8], pk_seed: &[u8], sl_root: &[u8], m: &[&[u8]]) -> [u8; 32] {
+    /// Stateless message digest, MGF1 over the digest of the inputs, to
+    /// `out_len` bytes.
+    ///
+    /// It takes its own root as a parameter; the caller passes the *stateful*
+    /// root inside `m`. That asymmetry is the cross-binding, and it is why
+    /// neither component can be used alone.
+    ///
+    /// The draft writes this as a single further digest with four zero bytes
+    /// appended, which is exactly MGF1's first block, so for any `out_len` up
+    /// to 32 the two coincide. Writing it as MGF1 is what lets the standard
+    /// FIPS 205 parameter sets run through the same code: SLH-DSA-SHA2-128f
+    /// needs m = 34, and so a second block.
+    fn h_msg_sl(r: &[u8], pk_seed: &[u8], sl_root: &[u8], m: &[&[u8]], out_len: usize) -> Vec<u8> {
         let mut inner: Vec<&[u8]> = vec![r, pk_seed, sl_root];
         inner.extend_from_slice(m);
         let inner = Self::digest(&inner);
-        Self::digest(&[r, pk_seed, &inner, &[0u8; 4]])
+        let mut out = Vec::with_capacity(out_len.next_multiple_of(32));
+        let mut counter: u32 = 0;
+        while out.len() < out_len {
+            out.extend_from_slice(&Self::digest(&[r, pk_seed, &inner, &counter.to_be_bytes()]));
+            counter += 1;
+        }
+        out.truncate(out_len);
+        out
     }
 
     /// Stateful message digest, binding the leaf position through the first

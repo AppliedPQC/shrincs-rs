@@ -100,7 +100,7 @@ impl<S: HashSuite> Shrincs<S> {
         let (sk_seed, sk_prf, pk_seed) = (&seed[0..16], &seed[16..32], &seed[32..48]);
         let mut adrs = Adrs::new();
         adrs.set_layer((SPHX_LAYER_COUNT - 1) as u8);
-        let sl_root = stateless::xmss_node::<S>(sk_seed, 0, SPHX_XMSS_HEIGHT, pk_seed, &mut adrs);
+        let sl_root = stateless::xmss_node::<S>(sk_seed, 0, SHRINCS_SL.h_prime, pk_seed, &mut adrs);
         let sf_root = fxmss::fxmss_node::<S>(
             sk_seed,
             0,
@@ -158,6 +158,7 @@ impl<S: HashSuite> Shrincs<S> {
                 pk_seed,
                 sl_root,
                 opt_rand,
+                &SHRINCS_SL,
             ));
             return Some(out);
         };
@@ -205,6 +206,7 @@ impl<S: HashSuite> Shrincs<S> {
                 ctx,
                 pk_seed,
                 sl_root,
+                &SHRINCS_SL,
             );
         }
         if !(SF_SIGNATURE_SIZE_MIN..=SF_SIGNATURE_SIZE_MAX).contains(&sig.len()) {
