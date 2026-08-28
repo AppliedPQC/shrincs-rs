@@ -15,7 +15,10 @@ use shrincs::{keygen, sign, verify, PublicKey, SecretKey, Structure};
 use std::io::Read;
 
 fn hex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 fn hx(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -34,8 +37,10 @@ fn main() {
         match mode.as_str() {
             "sign" => {
                 let seed: [u8; 48] = hex(job["seed"].as_str().unwrap()).try_into().unwrap();
-                let structure = Structure([job["shape"].as_u64().unwrap() as u8,
-                                           job["depth"].as_u64().unwrap() as u8]);
+                let structure = Structure([
+                    job["shape"].as_u64().unwrap() as u8,
+                    job["depth"].as_u64().unwrap() as u8,
+                ]);
                 let (sk, pk): (SecretKey, PublicKey) = keygen(&seed, structure);
                 let ctr = job["ctr"].as_u64();
                 let opt_rand = job.get("opt_rand").and_then(|v| v.as_str()).map(hex);
@@ -46,7 +51,8 @@ fn main() {
                 }));
             }
             "verify" => {
-                let pk: PublicKey = hex(job["pubkey"].as_str().unwrap()).try_into()
+                let pk: PublicKey = hex(job["pubkey"].as_str().unwrap())
+                    .try_into()
                     .expect("public key must be 48 bytes");
                 let sig = hex(job["sig"].as_str().unwrap());
                 out.push(json!({ "ok": verify(&msg, &sig, &ctx, &pk) }));
