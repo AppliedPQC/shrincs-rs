@@ -56,6 +56,30 @@ One host, `SHRINCS_B32` for the C++ and UXMSS depth 255 at counter 0 here.
 | stateless signing | 1932.92 ms | 1251.50 ms |
 | stateless verification | 1.9423 ms | 1.0101 ms |
 
+## The truncation demo
+
+The repository carries `kat/truncation_bug_demo.cpp`, written to show that only
+the first 32 bytes of a message reached the digest, so a signature verified
+under any message sharing that prefix. Its header says as much: "Corruption
+after byte 32 - expected Fail, but the result is Pass."
+
+Built and run against the current HEAD, it no longer reproduces:
+
+```
+records:     20
+result=Fail: 20
+result=Pass:  0
+```
+
+The defect has been fixed and the demo survives as a regression artifact. It is
+worth knowing about because it is the sharpest failure mode this family of
+schemes has — a signature that covers a prefix rather than a message is a
+universal forgery for anything sharing that prefix — and because nothing in the
+draft's own test material probes for it. `the_whole_message_is_signed_not_a_prefix`
+in `tests/kat.rs` runs the same probe against this crate, corrupting each of
+eight positions in messages of six lengths, on both signing paths, and also
+rejecting a message extended by one byte.
+
 ## What this does and does not show
 
 The older design produces **smaller signatures and is slower**; the draft's
