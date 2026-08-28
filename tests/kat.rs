@@ -32,7 +32,8 @@ fn components_match_the_reference() {
     let digest = hex(c["grind_digest"].as_str().unwrap());
 
     let mut adrs = shrincs::adrs::Adrs::new();
-    let (counter, indexes) = shrincs::wots::wots_c_grind(pk_seed, &digest, &mut adrs).unwrap();
+    let (counter, indexes) =
+        shrincs::wots::wots_c_grind::<shrincs::hash::Sha256>(pk_seed, &digest, &mut adrs).unwrap();
     assert_eq!(
         counter as u64,
         c["grind_counter"].as_u64().unwrap(),

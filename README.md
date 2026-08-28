@@ -85,6 +85,37 @@ tree shapes, and the stateless fallback, byte for byte. Alongside them:
 - tampering tests cover message swaps, context swaps, single flipped bits at
   four positions, and verification under the wrong key, on both paths.
 
+## Choosing a hash
+
+The draft specifies SHA-256 and nothing else, deliberately: it is the hash
+Bitcoin consensus already has. `Shrincs256`, and the free functions at the crate
+root, are that scheme.
+
+The construction itself does not depend on SHA-256, so the primitive sits behind
+a trait. A suite supplies a digest, a keyed mode, and how much padding follows
+the seed; the nine named functions of the draft are derived from those once.
+BLAKE3 is included behind the `blake3` feature as a second instantiation.
+
+```rust
+use shrincs::{Shrincs, Shrincs256, hash::Sha256};
+type Spec = Shrincs<Sha256>;          // identical to Shrincs256
+```
+
+**A scheme instantiated with any suite other than SHA-256 is not SHRINCS.** It
+does not interoperate, the draft's security argument does not transfer, and the
+known-answer tests do not apply. `tests/suites.rs` asserts the non-interoperability
+rather than leaving it to be assumed: same seed and shape give different keys, and
+a signature made under one suite fails under the other.
+
+## Against the C++ implementation
+
+[`comparison/`](comparison/) reproduces a same-machine measurement against
+`BlockstreamResearch/shrincs-cpp`, which implements an earlier design — `w = 256`
+over 16 chains with PORS+FP, where the draft specifies `w = 16` over 32 chains
+with FORS. The older design is smaller and slower, the draft's parameters larger
+and faster, which is the trade the working group described. The numbers cannot
+separate parameter choice from implementation effort, and the directory says so.
+
 ## Layout
 
 | Module | Contents |
@@ -95,6 +126,8 @@ tree shapes, and the stateless fallback, byte for byte. Alongside them:
 | `wots` | WOTS-TW (checksum) and WOTS+C (constant sum) |
 | `fxmss` | The variable-shape stateful tree and its shape-agnostic verifier |
 | `stateless` | XMSS, the hypertree, FORS, and SLH-DSA over them |
+
+`hash::HashSuite` is the trait; `hash::Sha256` is the specified instantiation.
 
 ## Licence
 

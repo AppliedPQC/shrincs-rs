@@ -1,29 +1,149 @@
-//! The hash family, all built from SHA-256.
+//! The hash layer, and the trait that lets it be swapped.
 //!
-//! Every tweakable hash has the same shape:
+//! # What the draft fixes, and what this abstracts
+//!
+//! SHRINCS specifies SHA-256 and nothing else, deliberately: it is the hash
+//! Bitcoin consensus already has, and reusing it keeps the analysis and the
+//! hardware acceleration that come with it. Everything below is therefore
+//! structured so that [`Sha256`] reproduces the draft byte for byte.
+//!
+//! The trait exists because the *shape* of the construction does not depend on
+//! SHA-256. Every tweakable hash is
 //!
 //! ```text
-//! sha256(pk_seed || 0^48 || ADRS || M)[..16]
+//! digest(pk_seed || 0^pad || ADRS || M)[..16]
 //! ```
 //!
-//! The 48 zero bytes bring `pk_seed` up to 64, one full SHA-256 block, so an
-//! implementation can compress that block once and reuse the state. `H_GRIND`
-//! is the one exception: it reads only the first ten ADRS bytes so that its
-//! whole input fits a single further compression, which matters because
-//! grinding runs up to 2^16 times per signature.
+//! and only `digest`, a keyed mode, and the padding width change between
+//! primitives. A suite supplies those three; the nine named functions of the
+//! draft are then derived once, here, and shared.
+//!
+//! # A warning about substitution
+//!
+//! **A scheme instantiated with any suite other than [`Sha256`] is not
+//! SHRINCS.** It will not interoperate, the draft's security argument does not
+//! transfer to it, and the known-answer tests do not apply. The type parameter
+//! is there for experiment and comparison. [`crate::Shrincs256`] is the scheme
+//! the draft describes, and the free functions at the crate root are aliases
+//! for it, so the specified behaviour is what you get by default.
 
 use crate::adrs::Adrs;
 use crate::params::N;
-use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; N];
 
-fn sha256(parts: &[&[u8]]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    for p in parts {
-        h.update(p);
+/// The primitives a hash suite must supply. Everything else is derived.
+pub trait HashSuite {
+    /// Named in error messages and test output, so a mismatch is legible.
+    const NAME: &'static str;
+
+    /// Zero bytes placed after `pk_seed` so that the seed fills a whole
+    /// compression input and its state can be precomputed once per key.
+    ///
+    /// SHA-256 uses 48, bringing the 16-byte seed to one 64-byte block. A
+    /// primitive with no block structure worth exploiting can use 0; that
+    /// changes the encoding, and so changes the scheme, which is the point of
+    /// making it explicit.
+    const SEED_PAD: usize;
+
+    /// The unkeyed digest, over the concatenation of `parts`.
+    fn digest(parts: &[&[u8]]) -> [u8; 32];
+
+    /// The keyed digest. SHA-256 uses HMAC because the draft says so; a
+    /// primitive with a native keyed mode should use that instead.
+    fn mac(key: &[u8], parts: &[&[u8]]) -> [u8; 32];
+
+    // --- derived: the nine named functions of the draft -------------------
+
+    /// The tweakable hash. `F`, `H`, `T_sl`, `T_sf` and `T_k` are all this
+    /// function, separated only by the address handed to them.
+    fn t(pk_seed: &[u8], adrs: &Adrs, m: &[&[u8]]) -> Hash {
+        const ZEROS: [u8; 64] = [0u8; 64];
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + m.len());
+        parts.push(pk_seed);
+        parts.push(&ZEROS[..Self::SEED_PAD]);
+        parts.push(adrs.as_bytes());
+        parts.extend_from_slice(m);
+        truncate(Self::digest(&parts))
     }
-    h.finalize().into()
+
+    /// One step of a Winternitz chain.
+    fn f(pk_seed: &[u8], adrs: &Adrs, m: &[u8]) -> Hash {
+        Self::t(pk_seed, adrs, &[m])
+    }
+
+    /// Combines two Merkle children.
+    fn h(pk_seed: &[u8], adrs: &Adrs, left: &[u8], right: &[u8]) -> Hash {
+        Self::t(pk_seed, adrs, &[left, right])
+    }
+
+    /// Reads only the first ten address bytes, so the whole input fits a
+    /// single further compression. Grinding runs this up to 2^16 times per
+    /// signature, which is why it is the one function that does not take the
+    /// full address.
+    fn h_grind(pk_seed: &[u8], adrs: &Adrs, digest: &[u8], counter: u16) -> Hash {
+        const ZEROS: [u8; 64] = [0u8; 64];
+        truncate(Self::digest(&[
+            pk_seed,
+            &ZEROS[..Self::SEED_PAD],
+            &adrs.as_bytes()[..10],
+            digest,
+            &[0u8; 4],
+            &counter.to_be_bytes(),
+        ]))
+    }
+
+    /// Derives a chain or FORS secret. Consumes the whole 22-byte address,
+    /// which is how an FXMSS tree shape reaches every secret it owns.
+    fn prf(pk_seed: &[u8], sk_seed: &[u8], adrs: &Adrs) -> Hash {
+        const ZEROS: [u8; 64] = [0u8; 64];
+        truncate(Self::digest(&[
+            pk_seed,
+            &ZEROS[..Self::SEED_PAD],
+            adrs.as_bytes(),
+            sk_seed,
+        ]))
+    }
+
+    /// Message randomiser for the stateless path.
+    fn prf_msg_sl(sk_prf: &[u8], opt_rand: &[u8], m: &[&[u8]]) -> Hash {
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(1 + m.len());
+        parts.push(opt_rand);
+        parts.extend_from_slice(m);
+        truncate(Self::mac(sk_prf, &parts))
+    }
+
+    /// Message randomiser for the stateful path. The key is padded with 0xFF
+    /// so that it cannot coincide with the stateless key above.
+    fn prf_msg_sf(sk_prf: &[u8], pk_seed: &[u8], adrs: &Adrs, m: &[&[u8]]) -> Hash {
+        let mut key = [0xFFu8; 64];
+        key[..sk_prf.len()].copy_from_slice(sk_prf);
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(2 + m.len());
+        parts.push(pk_seed);
+        parts.push(&adrs.as_bytes()[..9]);
+        parts.extend_from_slice(m);
+        truncate(Self::mac(&key, &parts))
+    }
+
+    /// Stateless message digest. It takes its own root as a parameter; the
+    /// caller passes the *stateful* root inside `m`. That asymmetry is the
+    /// cross-binding, and it is why neither component can be used alone.
+    fn h_msg_sl(r: &[u8], pk_seed: &[u8], sl_root: &[u8], m: &[&[u8]]) -> [u8; 32] {
+        let mut inner: Vec<&[u8]> = vec![r, pk_seed, sl_root];
+        inner.extend_from_slice(m);
+        let inner = Self::digest(&inner);
+        Self::digest(&[r, pk_seed, &inner, &[0u8; 4]])
+    }
+
+    /// Stateful message digest, binding the leaf position through the first
+    /// nine address bytes, and the stateless root through `m`.
+    fn h_msg_sf(r: &[u8], pk_seed: &[u8], sf_root: &[u8], adrs: &Adrs, m: &[&[u8]]) -> [u8; 32] {
+        let a9 = &adrs.as_bytes()[..9];
+        let mut inner: Vec<&[u8]> = vec![r, pk_seed, sf_root, a9];
+        inner.extend_from_slice(m);
+        let inner = Self::digest(&inner);
+        Self::digest(&[r, pk_seed, &inner, a9])
+    }
 }
 
 fn truncate(d: [u8; 32]) -> Hash {
@@ -32,105 +152,78 @@ fn truncate(d: [u8; 32]) -> Hash {
     out
 }
 
-const PAD48: [u8; 48] = [0u8; 48];
+/// SHA-256: the suite the draft specifies, and the only one that is SHRINCS.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sha256;
 
-/// The common tweakable hash. `F`, `H`, `T_sl`, `T_sf` and `T_k` of the draft
-/// are all this function; they differ only in the ADRS handed to them, which
-/// is the point of an address.
-pub fn t(pk_seed: &[u8], adrs: &Adrs, m: &[&[u8]]) -> Hash {
-    let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + m.len());
-    parts.push(pk_seed);
-    parts.push(&PAD48);
-    parts.push(adrs.as_bytes());
-    parts.extend_from_slice(m);
-    truncate(sha256(&parts))
-}
+impl HashSuite for Sha256 {
+    const NAME: &'static str = "SHA-256";
+    const SEED_PAD: usize = 48;
 
-/// One step of a Winternitz chain, or one Merkle parent: same function, and
-/// only the address distinguishes them.
-pub fn f(pk_seed: &[u8], adrs: &Adrs, m: &[u8]) -> Hash {
-    t(pk_seed, adrs, &[m])
-}
-
-/// Combines two Merkle children.
-pub fn h(pk_seed: &[u8], adrs: &Adrs, left: &[u8], right: &[u8]) -> Hash {
-    t(pk_seed, adrs, &[left, right])
-}
-
-/// Reads only `ADRS[..10]`, so the whole input fits one compression.
-pub fn h_grind(pk_seed: &[u8], adrs: &Adrs, digest: &[u8], counter: u16) -> Hash {
-    truncate(sha256(&[
-        pk_seed,
-        &PAD48,
-        &adrs.as_bytes()[..10],
-        digest,
-        &[0u8; 4],
-        &counter.to_be_bytes(),
-    ]))
-}
-
-/// Derives a chain or FORS secret. Consumes the whole 22-byte address, which
-/// is how an FXMSS tree shape reaches every secret it owns.
-pub fn prf(pk_seed: &[u8], sk_seed: &[u8], adrs: &Adrs) -> Hash {
-    truncate(sha256(&[pk_seed, &PAD48, adrs.as_bytes(), sk_seed]))
-}
-
-fn hmac_sha256(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
-    debug_assert!(key.len() <= 64);
-    let mut padded = [0u8; 64];
-    padded[..key.len()].copy_from_slice(key);
-    let mut ipad = [0x36u8; 64];
-    let mut opad = [0x5cu8; 64];
-    for i in 0..64 {
-        ipad[i] ^= padded[i];
-        opad[i] ^= padded[i];
+    fn digest(parts: &[&[u8]]) -> [u8; 32] {
+        use sha2::{Digest, Sha256 as S};
+        let mut h = S::new();
+        for p in parts {
+            h.update(p);
+        }
+        h.finalize().into()
     }
-    let mut inner_parts: Vec<&[u8]> = Vec::with_capacity(1 + message.len());
-    inner_parts.push(&ipad);
-    inner_parts.extend_from_slice(message);
-    let inner = sha256(&inner_parts);
-    sha256(&[&opad, &inner])
+
+    /// HMAC-SHA256, as the draft writes it out.
+    fn mac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+        debug_assert!(key.len() <= 64);
+        let mut padded = [0u8; 64];
+        padded[..key.len()].copy_from_slice(key);
+        let mut ipad = [0x36u8; 64];
+        let mut opad = [0x5cu8; 64];
+        for i in 0..64 {
+            ipad[i] ^= padded[i];
+            opad[i] ^= padded[i];
+        }
+        let mut inner: Vec<&[u8]> = Vec::with_capacity(1 + parts.len());
+        inner.push(&ipad);
+        inner.extend_from_slice(parts);
+        let inner = Self::digest(&inner);
+        Self::digest(&[&opad, &inner])
+    }
 }
 
-/// Message randomiser for the stateless path.
-pub fn prf_msg_sl(sk_prf: &[u8], opt_rand: &[u8], m: &[&[u8]]) -> Hash {
-    let mut parts: Vec<&[u8]> = Vec::with_capacity(1 + m.len());
-    parts.push(opt_rand);
-    parts.extend_from_slice(m);
-    truncate(hmac_sha256(sk_prf, &parts))
-}
+/// BLAKE3. **Not SHRINCS**, and not interoperable with it.
+///
+/// Provided so the cost of the construction can be measured against a
+/// different primitive. Two choices here are this crate's, not the draft's:
+/// `SEED_PAD` is zero, because BLAKE3 has no 64-byte block boundary to align
+/// a cached seed to, and `mac` uses BLAKE3's native keyed mode over a digest
+/// of the key rather than HMAC.
+#[cfg(feature = "blake3")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Blake3;
 
-/// Message randomiser for the stateful path. The key is padded with 0xFF so
-/// that it cannot coincide with the stateless key above.
-pub fn prf_msg_sf(sk_prf: &[u8], pk_seed: &[u8], adrs: &Adrs, m: &[&[u8]]) -> Hash {
-    let mut key = [0xFFu8; 64];
-    key[..sk_prf.len()].copy_from_slice(sk_prf);
-    let mut parts: Vec<&[u8]> = Vec::with_capacity(2 + m.len());
-    parts.push(pk_seed);
-    parts.push(&adrs.as_bytes()[..9]);
-    parts.extend_from_slice(m);
-    truncate(hmac_sha256(&key, &parts))
-}
+#[cfg(feature = "blake3")]
+impl HashSuite for Blake3 {
+    const NAME: &'static str = "BLAKE3";
+    const SEED_PAD: usize = 0;
 
-/// Stateless message digest. Takes its own root as a parameter; the caller
-/// passes the stateful root inside `m`, which is the cross-binding.
-pub fn h_msg_sl(r: &[u8], pk_seed: &[u8], sl_root: &[u8], m: &[&[u8]]) -> [u8; 32] {
-    let mut inner_parts: Vec<&[u8]> = vec![r, pk_seed, sl_root];
-    inner_parts.extend_from_slice(m);
-    let inner = sha256(&inner_parts);
-    sha256(&[r, pk_seed, &inner, &[0u8; 4]])
-}
+    fn digest(parts: &[&[u8]]) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        for p in parts {
+            h.update(p);
+        }
+        *h.finalize().as_bytes()
+    }
 
-/// Stateful message digest, binding the leaf position through `ADRS[..9]`.
-pub fn h_msg_sf(r: &[u8], pk_seed: &[u8], sf_root: &[u8], adrs: &Adrs, m: &[&[u8]]) -> [u8; 32] {
-    let a9 = &adrs.as_bytes()[..9];
-    let mut inner_parts: Vec<&[u8]> = vec![r, pk_seed, sf_root, a9];
-    inner_parts.extend_from_slice(m);
-    let inner = sha256(&inner_parts);
-    sha256(&[r, pk_seed, &inner, a9])
+    fn mac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+        let k = Self::digest(&[key]);
+        let mut h = blake3::Hasher::new_keyed(&k);
+        for p in parts {
+            h.update(p);
+        }
+        *h.finalize().as_bytes()
+    }
 }
 
 /// Reads `out_len` big-endian fields of `b` bits each from `x`.
+/// Independent of the hash suite.
 pub fn base_2b(x: &[u8], b: usize, out_len: usize) -> Vec<u32> {
     debug_assert!(x.len() >= (out_len * b).div_ceil(8));
     let mut out = Vec::with_capacity(out_len);

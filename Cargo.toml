@@ -11,6 +11,12 @@ categories = ["cryptography", "no-std"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+blake3 = { version = "1", optional = true, default-features = false }
+
+[features]
+default = []
+# BLAKE3 as an alternative suite. Not SHRINCS; see hash::Blake3.
+blake3 = ["dep:blake3"]
 
 [dev-dependencies]
 serde_json = "1"
