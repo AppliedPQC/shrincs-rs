@@ -8,7 +8,7 @@
 //! enters key derivation, through the two structure bytes that `PRF` sees.
 
 use crate::adrs::*;
-use crate::hash::{h, Hash};
+use crate::hash::{Hash, HashSuite};
 use crate::params::*;
 use crate::wots::{wots_c_pubkey_from_sig, wots_c_pubkey_gen, wots_c_sign};
 
@@ -38,7 +38,7 @@ fn is_leaf(structure: [u8; 2], node_depth: u32, node_index: u64) -> bool {
     }
 }
 
-pub fn fxmss_node(
+pub fn fxmss_node<S: HashSuite>(
     sk_seed: &[u8],
     node_index: u64,
     node_height: u8,
@@ -50,9 +50,9 @@ pub fn fxmss_node(
     if is_leaf(structure, node_depth, node_index) {
         adrs.set_node_height(node_height).set_node_index(node_index);
         adrs.zero_payload0().set_structure(structure);
-        return wots_c_pubkey_gen(sk_seed, pk_seed, adrs);
+        return wots_c_pubkey_gen::<S>(sk_seed, pk_seed, adrs);
     }
-    let l = fxmss_node(
+    let l = fxmss_node::<S>(
         sk_seed,
         2 * node_index,
         node_height - 1,
@@ -60,7 +60,7 @@ pub fn fxmss_node(
         structure,
         adrs,
     );
-    let r = fxmss_node(
+    let r = fxmss_node::<S>(
         sk_seed,
         2 * node_index + 1,
         node_height - 1,
@@ -70,10 +70,10 @@ pub fn fxmss_node(
     );
     adrs.set_node_height(node_height).set_node_index(node_index);
     adrs.set_type(SF_FXMSS_TREE).zero_payload();
-    h(pk_seed, adrs, &l, &r)
+    S::h(pk_seed, adrs, &l, &r)
 }
 
-pub fn fxmss_sign(
+pub fn fxmss_sign<S: HashSuite>(
     digest: &[u8],
     sk_seed: &[u8],
     leaf_index: u64,
@@ -85,11 +85,11 @@ pub fn fxmss_sign(
     let mut adrs = Adrs::new();
     adrs.set_node_height(leaf_height).set_node_index(leaf_index);
     adrs.zero_payload0().set_structure(structure);
-    let mut sig = wots_c_sign(digest, sk_seed, pk_seed, &mut adrs)?;
+    let mut sig = wots_c_sign::<S>(digest, sk_seed, pk_seed, &mut adrs)?;
     for j in 0..leaf_depth {
         let sibling = shr(leaf_index, j) ^ 1;
         let sibling_height = (leaf_height as u32 + j) as u8;
-        sig.extend_from_slice(&fxmss_node(
+        sig.extend_from_slice(&fxmss_node::<S>(
             sk_seed,
             sibling,
             sibling_height,
@@ -104,7 +104,7 @@ pub fn fxmss_sign(
 /// The whole verifier. It is given a leaf index, a height and the signature,
 /// and never the tree shape: one code path covers UXMSS, BXMSS and anything
 /// else a signer builds.
-pub fn fxmss_pubkey_from_sig(
+pub fn fxmss_pubkey_from_sig<S: HashSuite>(
     leaf_index: u64,
     leaf_height: u8,
     sig: &[u8],
@@ -119,16 +119,16 @@ pub fn fxmss_pubkey_from_sig(
     let (wots_sig, auth) = sig.split_at(head);
     let mut adrs = Adrs::new();
     adrs.set_node_height(leaf_height).set_node_index(leaf_index);
-    let mut node = wots_c_pubkey_from_sig(wots_sig, digest, pk_seed, &mut adrs)?;
+    let mut node = wots_c_pubkey_from_sig::<S>(wots_sig, digest, pk_seed, &mut adrs)?;
     adrs.set_type(SF_FXMSS_TREE).zero_payload();
     for k in 0..leaf_depth {
         adrs.set_node_height(adrs.node_height() + 1);
         adrs.set_node_index(shr(leaf_index, k + 1));
         let sib = &auth[(k as usize) * N..((k as usize) + 1) * N];
         node = if shr(leaf_index, k) & 1 == 1 {
-            h(pk_seed, &adrs, sib, &node)
+            S::h(pk_seed, &adrs, sib, &node)
         } else {
-            h(pk_seed, &adrs, &node, sib)
+            S::h(pk_seed, &adrs, &node, sib)
         };
     }
     Some(node)

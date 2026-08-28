@@ -45,6 +45,7 @@ pub mod stateless;
 pub mod wots;
 
 use adrs::Adrs;
+use hash::HashSuite;
 use params::*;
 
 /// The shape of the stateful tree, chosen once at key generation.
@@ -79,44 +80,180 @@ impl Structure {
 pub type SecretKey = [u8; SECKEY_SIZE];
 pub type PublicKey = [u8; PUBKEY_SIZE];
 
-/// `pk_seed || sl_root || sf_root`. Truncating the last 16 bytes leaves a
-/// valid SLH-DSA public key for the fallback component.
-pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> (SecretKey, PublicKey) {
-    let (sk_seed, sk_prf, pk_seed) = (&seed[0..16], &seed[16..32], &seed[32..48]);
-    let mut adrs = Adrs::new();
-    adrs.set_layer((SPHX_LAYER_COUNT - 1) as u8);
-    let sl_root = stateless::xmss_node(sk_seed, 0, SPHX_XMSS_HEIGHT, pk_seed, &mut adrs);
-    let sf_root = fxmss::fxmss_node(
-        sk_seed,
-        0,
-        FXMSS_HEIGHT,
-        pk_seed,
-        structure.0,
-        &mut Adrs::new(),
-    );
+/// The scheme, over a choice of hash suite.
+///
+/// [`Shrincs256`] is the one the draft specifies. Any other instantiation is a
+/// different scheme: it will not interoperate, the draft's security argument
+/// does not carry over, and the known-answer tests do not apply.
+pub struct Shrincs<S: HashSuite>(core::marker::PhantomData<S>);
 
-    let mut sk = [0u8; SECKEY_SIZE];
-    sk[0..16].copy_from_slice(sk_seed);
-    sk[16..32].copy_from_slice(sk_prf);
-    sk[32..48].copy_from_slice(pk_seed);
-    sk[48..64].copy_from_slice(&sl_root);
-    sk[64..66].copy_from_slice(&structure.0);
-    sk[66..82].copy_from_slice(&sf_root);
+/// SHRINCS as specified: SHA-256 throughout.
+pub type Shrincs256 = Shrincs<hash::Sha256>;
 
-    let mut pk = [0u8; PUBKEY_SIZE];
-    pk[0..16].copy_from_slice(pk_seed);
-    pk[16..32].copy_from_slice(&sl_root);
-    pk[32..48].copy_from_slice(&sf_root);
-    (sk, pk)
+impl<S: HashSuite> Shrincs<S> {
+    /// Which hash suite this instantiation uses, for error messages and tests.
+    pub const HASH: &'static str = S::NAME;
+
+    /// Produces `pk_seed || sl_root || sf_root`. Truncating the public key's
+    /// last 16 bytes leaves a valid SLH-DSA public key for the fallback.
+    pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> (SecretKey, PublicKey) {
+        let (sk_seed, sk_prf, pk_seed) = (&seed[0..16], &seed[16..32], &seed[32..48]);
+        let mut adrs = Adrs::new();
+        adrs.set_layer((SPHX_LAYER_COUNT - 1) as u8);
+        let sl_root = stateless::xmss_node::<S>(sk_seed, 0, SHRINCS_SL.h_prime, pk_seed, &mut adrs);
+        let sf_root = fxmss::fxmss_node::<S>(
+            sk_seed,
+            0,
+            FXMSS_HEIGHT,
+            pk_seed,
+            structure.0,
+            &mut Adrs::new(),
+        );
+
+        let mut sk = [0u8; SECKEY_SIZE];
+        sk[0..16].copy_from_slice(sk_seed);
+        sk[16..32].copy_from_slice(sk_prf);
+        sk[32..48].copy_from_slice(pk_seed);
+        sk[48..64].copy_from_slice(&sl_root);
+        sk[64..66].copy_from_slice(&structure.0);
+        sk[66..82].copy_from_slice(&sf_root);
+
+        let mut pk = [0u8; PUBKEY_SIZE];
+        pk[0..16].copy_from_slice(pk_seed);
+        pk[16..32].copy_from_slice(&sl_root);
+        pk[32..48].copy_from_slice(&sf_root);
+        (sk, pk)
+    }
+
+    /// Signs with the stateful path when `state_ctr` names an unused leaf, and
+    /// with the stateless fallback otherwise. Exhausting the budget is not an
+    /// error: it takes the same branch as having no counter at all.
+    ///
+    /// **The caller owns the counter.** Signing twice under one value hands an
+    /// observer of both signatures the ability to forge. Persist it before
+    /// releasing the signature, never restore it from a backup, and never sign
+    /// concurrently with it.
+    pub fn sign(
+        message: &[u8],
+        ctx: &[u8],
+        sk: &SecretKey,
+        state_ctr: Option<u64>,
+        opt_rand: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        if ctx.len() >= 256 {
+            return None;
+        }
+        let (sk_seed, sk_prf, pk_seed) = (&sk[0..16], &sk[16..32], &sk[32..48]);
+        let (sl_root, structure, sf_root) = (&sk[48..64], [sk[64], sk[65]], &sk[66..82]);
+
+        let leaf = state_ctr.and_then(|c| fxmss::leaf_select(structure, c));
+        let Some((leaf_index, leaf_height)) = leaf else {
+            let mut out = Vec::with_capacity(SL_SIGNATURE_SIZE);
+            out.push(FXMSS_HEIGHT);
+            out.extend_from_slice(&stateless::slh_dsa_sign::<S>(
+                &[sf_root, message],
+                ctx,
+                sk_seed,
+                sk_prf,
+                pk_seed,
+                sl_root,
+                opt_rand,
+                &SHRINCS_SL,
+            ));
+            return Some(out);
+        };
+
+        let prefix = [0u8, ctx.len() as u8];
+        let bound: [&[u8]; 4] = [&prefix, ctx, sl_root, message];
+        let mut adrs = Adrs::new();
+        adrs.set_node_height(leaf_height).set_node_index(leaf_index);
+        let r = S::prf_msg_sf(sk_prf, pk_seed, &adrs, &bound);
+        let digest = S::h_msg_sf(&r, pk_seed, sf_root, &adrs, &bound);
+        let fxmss_sig = fxmss::fxmss_sign::<S>(
+            &digest,
+            sk_seed,
+            leaf_index,
+            leaf_height,
+            pk_seed,
+            structure,
+        )?;
+
+        let leaf_depth = (FXMSS_HEIGHT - leaf_height) as usize;
+        let index_len = leaf_depth.min(64).div_ceil(8);
+        let mut out = Vec::with_capacity(1 + N + index_len + fxmss_sig.len());
+        out.push(leaf_height);
+        out.extend_from_slice(&r);
+        out.extend_from_slice(&leaf_index.to_be_bytes()[8 - index_len..]);
+        out.extend_from_slice(&fxmss_sig);
+        Some(out)
+    }
+
+    /// Accepts a signature from either path. The first byte is the
+    /// discriminator: 255 is the fallback, anything below it is the leaf
+    /// height of a stateful signature. Depth zero cannot sign, which is what
+    /// frees 255 as a tag.
+    pub fn verify(message: &[u8], sig: &[u8], ctx: &[u8], pk: &PublicKey) -> bool {
+        if ctx.len() >= 256 || sig.is_empty() {
+            return false;
+        }
+        let (pk_seed, sl_root, sf_root) = (&pk[0..16], &pk[16..32], &pk[32..48]);
+        let indicator = sig[0];
+
+        if indicator == FXMSS_HEIGHT {
+            return stateless::slh_dsa_verify::<S>(
+                &[sf_root, message],
+                &sig[1..],
+                ctx,
+                pk_seed,
+                sl_root,
+                &SHRINCS_SL,
+            );
+        }
+        if !(SF_SIGNATURE_SIZE_MIN..=SF_SIGNATURE_SIZE_MAX).contains(&sig.len()) {
+            return false;
+        }
+        let leaf_height = indicator;
+        let leaf_depth = (FXMSS_HEIGHT - leaf_height) as u32;
+        let index_len = (leaf_depth as usize).min(64).div_ceil(8);
+        if sig.len() < 1 + N + index_len {
+            return false;
+        }
+        let r = &sig[1..1 + N];
+        let mut idx = [0u8; 8];
+        idx[8 - index_len..].copy_from_slice(&sig[1 + N..1 + N + index_len]);
+        let leaf_index = u64::from_be_bytes(idx);
+        if !fxmss::index_fits(leaf_index, leaf_depth) {
+            return false;
+        }
+
+        let prefix = [0u8, ctx.len() as u8];
+        let bound: [&[u8]; 4] = [&prefix, ctx, sl_root, message];
+        let mut adrs = Adrs::new();
+        adrs.set_node_height(leaf_height).set_node_index(leaf_index);
+        let digest = S::h_msg_sf(r, pk_seed, sf_root, &adrs, &bound);
+
+        match fxmss::fxmss_pubkey_from_sig::<S>(
+            leaf_index,
+            leaf_height,
+            &sig[1 + N + index_len..],
+            &digest,
+            pk_seed,
+        ) {
+            Some(root) => root == sf_root,
+            None => false,
+        }
+    }
 }
 
-/// Signs with the stateful path when `state_ctr` names an unused leaf, and
-/// with the stateless fallback otherwise.
-///
-/// **The caller owns the counter.** Signing twice under one value hands an
-/// observer of both signatures the ability to forge. The counter must be
-/// persisted before the signature is released, and must never be restored
-/// from a backup or used concurrently.
+// The scheme as specified. These are the entry points to reach for; anything
+// generic over a suite is an experiment, not SHRINCS.
+
+/// Key generation for SHRINCS as specified.
+pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> (SecretKey, PublicKey) {
+    Shrincs256::keygen(seed, structure)
+}
+
+/// Signing for SHRINCS as specified. See [`Shrincs::sign`] for the counter rules.
 pub fn sign(
     message: &[u8],
     ctx: &[u8],
@@ -124,100 +261,12 @@ pub fn sign(
     state_ctr: Option<u64>,
     opt_rand: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
-    if ctx.len() >= 256 {
-        return None;
-    }
-    let (sk_seed, sk_prf, pk_seed) = (&sk[0..16], &sk[16..32], &sk[32..48]);
-    let (sl_root, structure, sf_root) = (&sk[48..64], [sk[64], sk[65]], &sk[66..82]);
-
-    let leaf = state_ctr.and_then(|c| fxmss::leaf_select(structure, c));
-    let Some((leaf_index, leaf_height)) = leaf else {
-        // No usable leaf: sign sf_root || message with the stateless component.
-        let mut out = Vec::with_capacity(SL_SIGNATURE_SIZE);
-        out.push(FXMSS_HEIGHT);
-        out.extend_from_slice(&stateless::slh_dsa_sign(
-            &[sf_root, message],
-            ctx,
-            sk_seed,
-            sk_prf,
-            pk_seed,
-            sl_root,
-            opt_rand,
-        ));
-        return Some(out);
-    };
-
-    let prefix = [0u8, ctx.len() as u8];
-    let bound: [&[u8]; 4] = [&prefix, ctx, sl_root, message];
-    let mut adrs = Adrs::new();
-    adrs.set_node_height(leaf_height).set_node_index(leaf_index);
-    let r = hash::prf_msg_sf(sk_prf, pk_seed, &adrs, &bound);
-    let digest = hash::h_msg_sf(&r, pk_seed, sf_root, &adrs, &bound);
-    let fxmss_sig = fxmss::fxmss_sign(
-        &digest,
-        sk_seed,
-        leaf_index,
-        leaf_height,
-        pk_seed,
-        structure,
-    )?;
-
-    let leaf_depth = (FXMSS_HEIGHT - leaf_height) as usize;
-    let index_len = leaf_depth.min(64).div_ceil(8);
-    let mut out = Vec::with_capacity(1 + N + index_len + fxmss_sig.len());
-    out.push(leaf_height);
-    out.extend_from_slice(&r);
-    out.extend_from_slice(&leaf_index.to_be_bytes()[8 - index_len..]);
-    out.extend_from_slice(&fxmss_sig);
-    Some(out)
+    Shrincs256::sign(message, ctx, sk, state_ctr, opt_rand)
 }
 
-/// Accepts a signature from either path. The first byte is the discriminator:
-/// 255 is the fallback, anything below it is the leaf height of a stateful
-/// signature. Depth zero cannot sign, which is what frees 255 as a tag.
+/// Verification for SHRINCS as specified.
 pub fn verify(message: &[u8], sig: &[u8], ctx: &[u8], pk: &PublicKey) -> bool {
-    if ctx.len() >= 256 || sig.is_empty() {
-        return false;
-    }
-    let (pk_seed, sl_root, sf_root) = (&pk[0..16], &pk[16..32], &pk[32..48]);
-    let indicator = sig[0];
-
-    if indicator == FXMSS_HEIGHT {
-        return stateless::slh_dsa_verify(&[sf_root, message], &sig[1..], ctx, pk_seed, sl_root);
-    }
-    if !(SF_SIGNATURE_SIZE_MIN..=SF_SIGNATURE_SIZE_MAX).contains(&sig.len()) {
-        return false;
-    }
-    let leaf_height = indicator;
-    let leaf_depth = (FXMSS_HEIGHT - leaf_height) as u32;
-    let index_len = (leaf_depth as usize).min(64).div_ceil(8);
-    if sig.len() < 1 + N + index_len {
-        return false;
-    }
-    let r = &sig[1..1 + N];
-    let mut idx = [0u8; 8];
-    idx[8 - index_len..].copy_from_slice(&sig[1 + N..1 + N + index_len]);
-    let leaf_index = u64::from_be_bytes(idx);
-    if !fxmss::index_fits(leaf_index, leaf_depth) {
-        return false;
-    }
-
-    let prefix = [0u8, ctx.len() as u8];
-    let bound: [&[u8]; 4] = [&prefix, ctx, sl_root, message];
-    let mut adrs = Adrs::new();
-    adrs.set_node_height(leaf_height).set_node_index(leaf_index);
-    let digest = hash::h_msg_sf(r, pk_seed, sf_root, &adrs, &bound);
-
-    match fxmss::fxmss_pubkey_from_sig(
-        leaf_index,
-        leaf_height,
-        &sig[1 + N + index_len..],
-        &digest,
-        pk_seed,
-    ) {
-        Some(root) => root == sf_root,
-        None => false,
-    }
+    Shrincs256::verify(message, sig, ctx, pk)
 }
 
 /// Re-derives every size the draft states, from the defining equations.

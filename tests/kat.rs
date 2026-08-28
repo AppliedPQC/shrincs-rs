@@ -32,7 +32,8 @@ fn components_match_the_reference() {
     let digest = hex(c["grind_digest"].as_str().unwrap());
 
     let mut adrs = shrincs::adrs::Adrs::new();
-    let (counter, indexes) = shrincs::wots::wots_c_grind(pk_seed, &digest, &mut adrs).unwrap();
+    let (counter, indexes) =
+        shrincs::wots::wots_c_grind::<shrincs::hash::Sha256>(pk_seed, &digest, &mut adrs).unwrap();
     assert_eq!(
         counter as u64,
         c["grind_counter"].as_u64().unwrap(),
@@ -143,5 +144,42 @@ fn tampering_is_rejected() {
         }
         let (_, other_pk) = keygen(&[10u8; 48], Structure::balanced(2));
         assert!(!verify(b"authentic", &sig, b"", &other_pk), "wrong key");
+    }
+}
+
+/// The whole message must be signed, not a prefix of it.
+///
+/// `shrincs-cpp` carries a `truncation_bug_demo` for a defect where only the
+/// first 32 bytes of the message reached the digest, so a signature verified
+/// under any message sharing that prefix. It no longer reproduces there. This
+/// is the same probe against this crate: corrupt one byte at every position of
+/// a long message, well past any plausible truncation boundary, and require
+/// rejection each time.
+#[test]
+fn the_whole_message_is_signed_not_a_prefix() {
+    let seed = [0x5au8; SEED_SIZE];
+    let (sk, pk) = keygen(&seed, Structure::balanced(1));
+
+    for mlen in [64usize, 80, 96, 112, 128, 256] {
+        let msg: Vec<u8> = (0..mlen).map(|i| i as u8).collect();
+        for state in [Some(0u64), None] {
+            let sig = sign(&msg, b"", &sk, state, None).unwrap();
+            assert!(verify(&msg, &sig, b"", &pk));
+            for pos in [0usize, 15, 16, 31, 32, 33, mlen / 2, mlen - 1] {
+                let mut bad = msg.clone();
+                bad[pos] ^= 0x01;
+                assert!(
+                    !verify(&bad, &sig, b"", &pk),
+                    "corruption at byte {pos} of a {mlen}-byte message went undetected"
+                );
+            }
+            // Extending the message must not verify either.
+            let mut longer = msg.clone();
+            longer.push(0);
+            assert!(
+                !verify(&longer, &sig, b"", &pk),
+                "a {mlen}-byte signature covered a longer message"
+            );
+        }
     }
 }
