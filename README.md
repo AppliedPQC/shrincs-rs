@@ -95,6 +95,23 @@ from Draft to Complete. Nothing in Wycheproof covers hash-based signatures
 either. What is above is the substitute — the draft's own reference for the
 scheme, and NIST's for the half of it that is FIPS 205.
 
+**Cross-verification.** Byte-equality tests only the signer: if both sides
+produce the same bytes, nothing has been learned about either verifier.
+`./interop.py` points the two implementations at each other instead, over
+randomly generated shapes, depths, counters, messages and contexts.
+
+```
+upstream 97216c1, 40 random cases
+  rust signs   -> python verifies : 40/40
+  python signs -> rust verifies   : 120/120 agree (40 accept, 80 reject)
+cross-verification: OK
+```
+
+The rejections are the point. Each case is repeated with one bit flipped in the
+message and one bit flipped in the signature, and this crate must reject exactly
+what upstream rejects — a verifier that accepted too much and one that accepted
+too little would both fail, where byte-equality would notice neither.
+
 **Against NIST.** The stateless component is FIPS 205 under a non-standard
 parameter set, and that claim is only worth something if the shared machinery
 really is FIPS 205. The parameter set is therefore a value rather than a
