@@ -9,6 +9,11 @@ either verifier. This drives both directions instead.
     Python signs -> Rust verifies        do we accept what upstream produces?
     both mutate  -> both must reject     do we reject exactly what upstream does?
 
+It also pins the behaviour of the caller-supplied randomness. The draft says
+opt_rand is "unused in the stateful path", so on the stateless path a different
+value must give a different signature, and on the stateful path it must give
+the same one. Both are checked against upstream rather than assumed.
+
     ./interop.py [--repo DIR] [--cases N]
 
 With no --repo it clones the draft repository into a temporary directory.
@@ -102,7 +107,47 @@ def main():
     print(f"  python signs -> rust verifies   : {agree}/{len(expect)} agree "
           f"({sum(expect)} accept, {len(expect) - sum(expect)} reject)")
 
-    ok = bad == 0 and agree == len(expect)
+    # ---- caller-supplied randomness, agreed byte for byte ---------------
+    rand_jobs, rand_meta = [], []
+    for job in jobs:
+        r = bytes(rng.randrange(256) for _ in range(16))
+        rand_jobs.append(dict(job, opt_rand=r.hex()))
+        rand_meta.append(r)
+    rand_out = rust("sign", rand_jobs)
+    rand_bad = 0
+    for job, r, got in zip(jobs, rand_meta, rand_out):
+        sf = bytes([job["shape"], job["depth"]])
+        sk, _ = R.shrincs_keygen(bytes.fromhex(job["seed"]), sf)
+        want = R.shrincs_sign(bytes.fromhex(job["msg"]), bytes.fromhex(job["ctx"]),
+                              sk, job["ctr"], r)
+        if bytes.fromhex(got["sig"]) != want:
+            print(f"  randomised signature differs: {job['shape']}/{job['depth']} ctr={job['ctr']}")
+            rand_bad += 1
+    print(f"  explicit opt_rand, byte-identical: {len(jobs) - rand_bad}/{len(jobs)}")
+
+    # ---- and it is used on one path and ignored on the other ------------
+    stateless_varies = stateful_ignores = 0
+    n_sl = n_sf = 0
+    for job in jobs:
+        a = dict(job, opt_rand=("11" * 16))
+        b = dict(job, opt_rand=("22" * 16))
+        sig_a, sig_b = rust("sign", [a, b])
+        differs = sig_a["sig"] != sig_b["sig"]
+        if job["ctr"] is None:
+            n_sl += 1
+            stateless_varies += differs
+            if not differs:
+                print("  stateless signature did not change with opt_rand")
+        else:
+            n_sf += 1
+            stateful_ignores += not differs
+            if differs:
+                print("  stateful signature changed with opt_rand, which is unused there")
+    print(f"  opt_rand changes the stateless signature : {stateless_varies}/{n_sl}")
+    print(f"  opt_rand ignored by the stateful path    : {stateful_ignores}/{n_sf}")
+
+    ok = (bad == 0 and agree == len(expect) and rand_bad == 0
+          and stateless_varies == n_sl and stateful_ignores == n_sf)
     print("cross-verification:", "OK" if ok else "MISMATCH")
     return 0 if ok else 1
 

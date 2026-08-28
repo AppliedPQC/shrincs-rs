@@ -104,6 +104,9 @@ randomly generated shapes, depths, counters, messages and contexts.
 upstream 97216c1, 40 random cases
   rust signs   -> python verifies : 40/40
   python signs -> rust verifies   : 120/120 agree (40 accept, 80 reject)
+  explicit opt_rand, byte-identical: 40/40
+  opt_rand changes the stateless signature : 11/11
+  opt_rand ignored by the stateful path    : 29/29
 cross-verification: OK
 ```
 
@@ -111,6 +114,14 @@ The rejections are the point. Each case is repeated with one bit flipped in the
 message and one bit flipped in the signature, and this crate must reject exactly
 what upstream rejects — a verifier that accepted too much and one that accepted
 too little would both fail, where byte-equality would notice neither.
+
+The last three lines pin the caller-supplied randomness. The draft says
+`opt_rand` is "unused in the stateful path", which is two claims rather than
+one: on the stateless path a different value must produce a different
+signature, and on the stateful path it must produce the same one. Both are
+checked against upstream, along with the two implementations agreeing byte for
+byte when handed the same explicit value rather than falling back to the
+deterministic default.
 
 **Against NIST.** The stateless component is FIPS 205 under a non-standard
 parameter set, and that claim is only worth something if the shared machinery
