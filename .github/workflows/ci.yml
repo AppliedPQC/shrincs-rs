@@ -1,0 +1,160 @@
+name: Tests
+
+# The crate is checked against three authorities, and each is a separate job
+# so a failure says which one disagreed.
+#
+#   check    the crate itself: formatting, lints, and the tests that need
+#            nothing fetched -- the draft's own vectors among them, since
+#            tests/kat.json is committed.
+#   nist     the stateless component against NIST's ACVP vectors, which are
+#            67 MB and so are cached rather than fetched every run.
+#   interop  the two implementations pointed at each other, which needs the
+#            draft's reference Python checked out.
+#
+# The last two are the slow ones and the ones that catch the subtle errors, so
+# they run on every pull request rather than on a schedule.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings here rather than letting them accumulate.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Format, lints and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      # Both feature configurations, because the BLAKE3 suite compiles code
+      # the default build never sees.
+      - name: Lints
+        run: |
+          cargo clippy --all-targets
+          cargo clippy --all-targets --features blake3
+
+      # Release, because signing at these parameters is minutes rather than
+      # seconds without optimisation.
+      - name: Tests
+        run: |
+          cargo test --release
+          cargo test --release --features blake3
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version the manifest claims
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # A build, not a test run: the claim is that the crate compiles there.
+      - run: cargo check --all-targets --features blake3
+
+  nist:
+    name: NIST ACVP vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-nist-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-nist-${{ runner.os }}-
+
+      # Keyed on the fetch script, so changing which files are pulled refreshes
+      # the cache and nothing else does.
+      - name: Cache the vectors
+        uses: actions/cache@v4
+        with:
+          path: vectors
+          key: acvp-${{ hashFiles('fetch-vectors.sh') }}
+
+      - name: Fetch any vectors not already cached
+        run: ./fetch-vectors.sh
+
+      # Fails rather than skips: without the vectors this job has no purpose,
+      # and tests/acvp.rs skips quietly when they are absent.
+      - name: Check the vectors arrived
+        run: |
+          for f in keyGen sigGen sigVer; do
+            test -s "vectors/SLH-DSA-$f-FIPS205.json" || { echo "missing $f vectors"; exit 1; }
+          done
+
+      - name: Cross-check against NIST
+        run: cargo test --release --test acvp -- --nocapture
+
+  interop:
+    name: Cross-verification against the draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the draft's reference implementation
+        uses: actions/checkout@v4
+        with:
+          repository: SHRINCS/shrincs-bip
+          path: shrincs-bip
+
+      - name: Cache the cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-interop-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-interop-${{ runner.os }}-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The vectors in tests/kat.json must still be what the reference
+      # produces, so a change upstream shows up here rather than silently
+      # leaving the crate tested against a stale copy.
+      - name: The committed vectors still match upstream
+        run: |
+          ./regenerate-kat.py --repo shrincs-bip
+          git diff --exit-code -- tests/kat.json \
+            || { echo "tests/kat.json is stale against upstream"; exit 1; }
+
+      # Signing in the reference Python is seconds per stateless signature, so
+      # the case count is kept low enough to stay inside a sensible CI budget.
+      - name: Both implementations verify each other
+        run: ./interop.py --repo shrincs-bip --cases 8
