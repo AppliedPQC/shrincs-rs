@@ -141,3 +141,45 @@ fn signatures_match_nist_vectors() {
     assert!(signed > 0, "no usable groups found");
     println!("sigGen: {signed} NIST vectors reproduced byte for byte");
 }
+
+/// NIST's negative-test suite: signatures that must be *rejected*, and why.
+///
+/// This is the part a hand-rolled tamper test cannot match. NIST curates six
+/// distinct failure modes — a modified message, a modified `R`, a modified
+/// FORS signature, a modified hypertree signature, and signatures too long and
+/// too short — alongside valid cases that must still verify. Getting all of
+/// them right means the verifier rejects for the right reasons rather than
+/// rejecting everything.
+#[test]
+fn verification_matches_nist_vectors_including_the_negative_cases() {
+    let Some(v) = vectors("SLH-DSA-sigVer-FIPS205.json") else { return };
+    let mut accepted = 0;
+    let mut rejected = 0;
+    let mut by_reason: std::collections::BTreeMap<String, usize> = Default::default();
+
+    for group in v["testGroups"].as_array().unwrap() {
+        let Some(p) = set_for(group["parameterSet"].as_str().unwrap_or("")) else { continue };
+        if group["signatureInterface"].as_str() != Some("internal") {
+            continue;
+        }
+        for t in group["tests"].as_array().unwrap() {
+            let pk = hex(t["pk"].as_str().unwrap());
+            let (pk_seed, pk_root) = (&pk[0..16], &pk[16..32]);
+            let msg = hex(t["message"].as_str().unwrap());
+            let sig = hex(t["signature"].as_str().unwrap());
+            let want = t["testPassed"].as_bool().unwrap();
+            let reason = t["reason"].as_str().unwrap_or("?").to_string();
+
+            let got = stateless::slh_dsa_verify_internal::<Sha256>(&[&msg], &sig, pk_seed, pk_root, p);
+            assert_eq!(got, want, "{} tcId {}: {}", p.name, t["tcId"], reason);
+
+            *by_reason.entry(reason).or_default() += 1;
+            if want { accepted += 1 } else { rejected += 1 }
+        }
+    }
+    assert!(accepted > 0 && rejected > 0, "expected both valid and invalid cases");
+    println!("sigVer: {accepted} accepted, {rejected} correctly rejected");
+    for (reason, n) in by_reason {
+        println!("   {n:3}  {reason}");
+    }
+}

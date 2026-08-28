@@ -89,6 +89,12 @@ tree shapes, and the stateless fallback, byte for byte. Alongside them:
 - `the_whole_message_is_signed_not_a_prefix` probes for the prefix-truncation
   defect the C++ repository documents, across six message lengths.
 
+There is no standard suite for SHRINCS itself, and will not be until the draft
+advances: it says so, listing comprehensive test vectors as required to move
+from Draft to Complete. Nothing in Wycheproof covers hash-based signatures
+either. What is above is the substitute — the draft's own reference for the
+scheme, and NIST's for the half of it that is FIPS 205.
+
 **Against NIST.** The stateless component is FIPS 205 under a non-standard
 parameter set, and that claim is only worth something if the shared machinery
 really is FIPS 205. The parameter set is therefore a value rather than a
@@ -102,8 +108,21 @@ cargo test --release --test acvp
 
 ```
 keyGen: 20 NIST vectors reproduced
-sigGen: 7 NIST vectors reproduced byte for byte
+sigGen:  7 NIST vectors reproduced byte for byte
+sigVer:  4 accepted, 24 correctly rejected
+           4  invalid signature - too large
+           4  invalid signature - too small
+           4  modified message
+           4  modified signature - R
+           4  modified signature - SIGFORS
+           4  modified signature - SIGHT
+           4  valid signature and message - signature should verify successfully
 ```
+
+The `sigVer` file is the part a hand-rolled tamper test cannot match: NIST
+curates six distinct failure modes and mixes them with valid cases, so passing
+means the verifier rejects for the right reasons rather than rejecting
+everything.
 
 This works because for the category-1 SHA2 sets the two coincide exactly. `F`,
 `H`, `T` and `PRF` are all `SHA256(pk_seed || 0^48 || ADRS_c || .)[..16]`,
