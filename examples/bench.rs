@@ -26,8 +26,10 @@ fn main() {
     let seed = [0u8; SEED_SIZE];
     let msg = [0u8; 32];
 
-    println!("{:<16} {:>7} {:>9} {:>11} {:>10} {:>12}",
-             "configuration", "budget", "sig bytes", "keygen ms", "sign ms", "verify ms");
+    println!(
+        "{:<16} {:>7} {:>9} {:>11} {:>10} {:>12}",
+        "configuration", "budget", "sig bytes", "keygen ms", "sign ms", "verify ms"
+    );
     println!("{}", "-".repeat(70));
 
     let shapes = [
@@ -49,8 +51,15 @@ fn main() {
         let sig = sig.unwrap();
         let t_verify = repeated(200, || assert!(verify(&msg, &sig, b"", &pk)));
 
-        println!("{:<16} {:>7} {:>9} {:>11.0} {:>10.1} {:>12.4}",
-                 name, structure.budget(), sig.len(), t_keygen, t_sign, t_verify);
+        println!(
+            "{:<16} {:>7} {:>9} {:>11.0} {:>10.1} {:>12.4}",
+            name,
+            structure.budget(),
+            sig.len(),
+            t_keygen,
+            t_sign,
+            t_verify
+        );
     }
 
     // The fallback is the same whatever shape the stateful side has.
@@ -59,8 +68,15 @@ fn main() {
     let t_sign = once(|| fb = sign(&msg, b"", &sk, None, None));
     let fb = fb.unwrap();
     let t_verify = repeated(50, || assert!(verify(&msg, &fb, b"", &pk)));
-    println!("{:<16} {:>7} {:>9} {:>11} {:>10.0} {:>12.4}",
-             "stateless", "2^40", fb.len(), "-", t_sign, t_verify);
+    println!(
+        "{:<16} {:>7} {:>9} {:>11} {:>10.0} {:>12.4}",
+        "stateless",
+        "2^40",
+        fb.len(),
+        "-",
+        t_sign,
+        t_verify
+    );
 
     // The largest stateful signature, at the deepest leaf of the deepest tree.
     let structure = Structure::unbalanced(255);
@@ -68,6 +84,13 @@ fn main() {
     let last = structure.budget() - 1;
     let big = sign(&msg, b"", &sk, Some(last), None).unwrap();
     let t_verify = repeated(200, || assert!(verify(&msg, &big, b"", &pk)));
-    println!("{:<16} {:>7} {:>9} {:>11} {:>10} {:>12.4}",
-             "  deepest leaf", "-", big.len(), "-", "-", t_verify);
+    println!(
+        "{:<16} {:>7} {:>9} {:>11} {:>10} {:>12.4}",
+        "  deepest leaf",
+        "-",
+        big.len(),
+        "-",
+        "-",
+        t_verify
+    );
 }
