@@ -169,7 +169,9 @@ pub fn leaf_select(structure: Structure, state_ctr: u64) -> Option<(u64, u8)> {
     }
 }
 
-#[cfg(test)]
+// Debug-only as a whole, so release builds, which CI tests with warnings
+// denied, do not see the module's imports go unused.
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use crate::hash::Sha256;
@@ -180,7 +182,6 @@ mod tests {
     /// not exist onto node 0; a debug build stops here. Debug-only, since in
     /// release the call would instead start on 2^36 leaves.
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "overflows a u64")]
     fn a_child_index_past_u64_is_caught() {
         fxmss_node::<Sha256>(
