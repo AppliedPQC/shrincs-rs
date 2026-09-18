@@ -24,7 +24,7 @@
 //! ```
 //! use shrincs::{keygen, sign, verify, Structure};
 //! let seed = [7u8; 48];
-//! let (sk, pk) = keygen(&seed, Structure::balanced(3));
+//! let (sk, pk) = keygen(&seed, Structure::balanced(3).unwrap()).unwrap();
 //!
 //! // stateful, with the counter the caller is responsible for advancing
 //! let sig = sign(b"hello", b"", &sk, Some(0), None).unwrap();
@@ -48,31 +48,77 @@ use adrs::Adrs;
 use hash::HashSuite;
 use params::*;
 
+/// The deepest balanced tree accepted. At this depth every quantity on the
+/// stateful path, leaf index, counter and budget alike, fits a `u64`. At depth
+/// 64 the budget `2^64` would not, so a `u64` counter could reach only
+/// `2^64 - 1` of the leaves; the draft leaves that invariant emergent
+/// (SHRINCS/shrincs-bip#58) and this crate makes it a rule.
+pub const BXMSS_MAX_DEPTH: u8 = 63;
+
+/// The default ceiling on stateful-tree work, counted in WOTS+C leaves.
+///
+/// Key generation computes every leaf of the stateful tree, and each stateful
+/// signature recomputes the authentication path, which touches all of them
+/// again: a balanced tree of depth `d` costs `2^d` either way. `2^16` is about
+/// 24 seconds on the machine the README measures. The ceiling exists so that a
+/// structure from an untrusted or corrupted source fails at once instead of
+/// running for days. Raise it with [`Shrincs::keygen_with_limit`] and
+/// [`Shrincs::sign_with_limit`] for a deeper tree you mean to pay for.
+pub const DEFAULT_MAX_LEAVES: u64 = 1 << 16;
+
 /// The shape of the stateful tree, chosen once at key generation.
+///
+/// Only well-formed shapes have a value of this type: there is none for a
+/// balanced tree deeper than [`BXMSS_MAX_DEPTH`], nor for a shape byte the
+/// draft does not define.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Structure(pub [u8; 2]);
+pub struct Structure(pub(crate) [u8; 2]);
 
 impl Structure {
     /// A left-leaning tree. Budget `depth + 1`; the early signatures are the
     /// smallest the scheme can produce and they grow as the key is reused.
+    /// Every depth is valid, since its leaf indexes are only ever 0 and 1.
     pub fn unbalanced(depth: u8) -> Self {
         Structure([FXMSS_SHAPE_UNBALANCED, depth])
     }
     /// A balanced tree. Budget `2^depth`, every signature the same size.
-    pub fn balanced(depth: u8) -> Self {
-        Structure([FXMSS_SHAPE_BALANCED, depth])
+    /// `None` above [`BXMSS_MAX_DEPTH`].
+    pub fn balanced(depth: u8) -> Option<Self> {
+        (depth <= BXMSS_MAX_DEPTH).then_some(Structure([FXMSS_SHAPE_BALANCED, depth]))
+    }
+    /// Reads the two structure bytes a secret key carries. `None` for a shape
+    /// byte the draft does not define, or a balanced tree too deep to accept.
+    pub fn from_bytes(bytes: [u8; 2]) -> Option<Self> {
+        match bytes[0] {
+            FXMSS_SHAPE_UNBALANCED => Some(Self::unbalanced(bytes[1])),
+            FXMSS_SHAPE_BALANCED => Self::balanced(bytes[1]),
+            _ => None,
+        }
+    }
+    pub fn to_bytes(self) -> [u8; 2] {
+        self.0
     }
     pub fn depth(&self) -> u8 {
         self.0[1]
     }
-    /// How many stateful signatures this shape allows before the fallback
-    /// takes over.
-    pub fn budget(&self) -> u64 {
+    /// How many WOTS+C leaves the tree has. Key generation computes all of
+    /// them, and so, near enough, does each stateful signature; this is the
+    /// work either one costs.
+    pub fn leaves(&self) -> u64 {
         match self.0[0] {
             FXMSS_SHAPE_UNBALANCED => self.0[1] as u64 + 1,
-            FXMSS_SHAPE_BALANCED if self.0[1] < 64 => 1u64 << self.0[1],
-            FXMSS_SHAPE_BALANCED => u64::MAX,
-            _ => 0,
+            // Balanced, and no deeper than BXMSS_MAX_DEPTH by construction.
+            _ => 1u64 << self.0[1],
+        }
+    }
+    /// How many stateful signatures this shape allows before the fallback
+    /// takes over. Every leaf counts except in a depth-zero tree, whose one
+    /// leaf would sit at height 255, the byte that marks a fallback signature.
+    pub fn budget(&self) -> u64 {
+        if self.0[1] == 0 {
+            0
+        } else {
+            self.leaves()
         }
     }
 }
@@ -96,7 +142,24 @@ impl<S: HashSuite> Shrincs<S> {
 
     /// Produces `pk_seed || sl_root || sf_root`. Truncating the public key's
     /// last 16 bytes leaves a valid SLH-DSA public key for the fallback.
-    pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> (SecretKey, PublicKey) {
+    ///
+    /// `None` when the stateful tree has more than [`DEFAULT_MAX_LEAVES`]
+    /// leaves; see [`Self::keygen_with_limit`].
+    pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> Option<(SecretKey, PublicKey)> {
+        Self::keygen_with_limit(seed, structure, DEFAULT_MAX_LEAVES)
+    }
+
+    /// [`Self::keygen`] under an explicit ceiling on the stateful tree's
+    /// leaves. The ceiling is checked before any hashing, so a refusal costs
+    /// nothing.
+    pub fn keygen_with_limit(
+        seed: &[u8; SEED_SIZE],
+        structure: Structure,
+        max_leaves: u64,
+    ) -> Option<(SecretKey, PublicKey)> {
+        if structure.leaves() > max_leaves {
+            return None;
+        }
         let (sk_seed, sk_prf, pk_seed) = (&seed[0..16], &seed[16..32], &seed[32..48]);
         let mut adrs = Adrs::new();
         adrs.set_layer((SPHX_LAYER_COUNT - 1) as u8);
@@ -122,12 +185,17 @@ impl<S: HashSuite> Shrincs<S> {
         pk[0..16].copy_from_slice(pk_seed);
         pk[16..32].copy_from_slice(&sl_root);
         pk[32..48].copy_from_slice(&sf_root);
-        (sk, pk)
+        Some((sk, pk))
     }
 
     /// Signs with the stateful path when `state_ctr` names an unused leaf, and
     /// with the stateless fallback otherwise. Exhausting the budget is not an
     /// error: it takes the same branch as having no counter at all.
+    ///
+    /// `None` for a context of 256 bytes or more, for a secret key whose
+    /// structure bytes name no valid shape, and for a stateful signature over
+    /// a tree with more than [`DEFAULT_MAX_LEAVES`] leaves; see
+    /// [`Self::sign_with_limit`].
     ///
     /// **The caller owns the counter.** Signing twice under one value hands an
     /// observer of both signatures the ability to forge. Persist it before
@@ -140,11 +208,30 @@ impl<S: HashSuite> Shrincs<S> {
         state_ctr: Option<u64>,
         opt_rand: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
+        Self::sign_with_limit(message, ctx, sk, state_ctr, opt_rand, DEFAULT_MAX_LEAVES)
+    }
+
+    /// [`Self::sign`] under an explicit ceiling on the stateful tree's leaves,
+    /// for a key made by [`Self::keygen_with_limit`] above the default. The
+    /// ceiling binds only the stateful path; the fallback never touches the
+    /// tree.
+    pub fn sign_with_limit(
+        message: &[u8],
+        ctx: &[u8],
+        sk: &SecretKey,
+        state_ctr: Option<u64>,
+        opt_rand: Option<&[u8]>,
+        max_leaves: u64,
+    ) -> Option<Vec<u8>> {
         if ctx.len() >= 256 {
             return None;
         }
         let (sk_seed, sk_prf, pk_seed) = (&sk[0..16], &sk[16..32], &sk[32..48]);
-        let (sl_root, structure, sf_root) = (&sk[48..64], [sk[64], sk[65]], &sk[66..82]);
+        let (sl_root, sf_root) = (&sk[48..64], &sk[66..82]);
+        // `keygen` writes only well-formed structures, so a key carrying any
+        // other is corrupt or crafted. It is refused rather than walked: an
+        // over-deep balanced tree would run for years.
+        let structure = Structure::from_bytes([sk[64], sk[65]])?;
 
         let leaf = state_ctr.and_then(|c| fxmss::leaf_select(structure, c));
         let Some((leaf_index, leaf_height)) = leaf else {
@@ -162,6 +249,9 @@ impl<S: HashSuite> Shrincs<S> {
             ));
             return Some(out);
         };
+        if structure.leaves() > max_leaves {
+            return None;
+        }
 
         let prefix = [0u8, ctx.len() as u8];
         let bound: [&[u8]; 4] = [&prefix, ctx, sl_root, message];
@@ -175,7 +265,7 @@ impl<S: HashSuite> Shrincs<S> {
             leaf_index,
             leaf_height,
             pk_seed,
-            structure,
+            structure.0,
         )?;
 
         let leaf_depth = (FXMSS_HEIGHT - leaf_height) as usize;
@@ -248,8 +338,9 @@ impl<S: HashSuite> Shrincs<S> {
 // The scheme as specified. These are the entry points to reach for; anything
 // generic over a suite is an experiment, not SHRINCS.
 
-/// Key generation for SHRINCS as specified.
-pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> (SecretKey, PublicKey) {
+/// Key generation for SHRINCS as specified. `None` above
+/// [`DEFAULT_MAX_LEAVES`]; see [`Shrincs::keygen_with_limit`].
+pub fn keygen(seed: &[u8; SEED_SIZE], structure: Structure) -> Option<(SecretKey, PublicKey)> {
     Shrincs256::keygen(seed, structure)
 }
 

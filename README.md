@@ -25,7 +25,7 @@ path's root — so neither component can be lifted out and used on its own.
 use shrincs::{keygen, sign, verify, Structure};
 
 let seed = [7u8; 48];
-let (sk, pk) = keygen(&seed, Structure::balanced(3));   // budget 2^3 = 8
+let (sk, pk) = keygen(&seed, Structure::balanced(3).unwrap()).unwrap();   // budget 2^3 = 8
 
 // Stateful. The caller owns the counter; see the warning below.
 let sig = sign(b"hello", b"", &sk, Some(0), None).unwrap();
@@ -64,6 +64,18 @@ transaction confirms.
 Shape does not change the cost at a given budget, only the size curve:
 unbalanced front-loads the small signatures, balanced flattens them. Exhausting
 the budget is not an error — the fallback signs instead.
+
+Two limits apply to the balanced shape, and they answer different questions.
+`Structure::balanced(d)` accepts `d` up to 63, the depth at which every
+stateful quantity still fits a `u64`; at 64 the budget `2^64` does not
+([SHRINCS/shrincs-bip#58](https://github.com/SHRINCS/shrincs-bip/issues/58)).
+Separately, `keygen` and `sign` refuse a tree of more than `2^16` leaves, about
+24 seconds of work on the machine measured below, so that a structure from an
+untrusted or corrupted source fails at once instead of running for days. For a
+deeper tree you mean to pay for, `Shrincs256::keygen_with_limit` and
+`sign_with_limit` raise that ceiling. A depth of zero gives a budget of zero:
+its one leaf would sit at height 255, the byte that marks a fallback
+signature.
 
 ## Testing
 

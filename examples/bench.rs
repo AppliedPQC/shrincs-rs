@@ -35,14 +35,14 @@ fn main() {
     let shapes = [
         ("UXMSS d=8", Structure::unbalanced(8)),
         ("UXMSS d=255", Structure::unbalanced(255)),
-        ("BXMSS d=5", Structure::balanced(5)),
-        ("BXMSS d=8", Structure::balanced(8)),
-        ("BXMSS d=10", Structure::balanced(10)),
+        ("BXMSS d=5", Structure::balanced(5).unwrap()),
+        ("BXMSS d=8", Structure::balanced(8).unwrap()),
+        ("BXMSS d=10", Structure::balanced(10).unwrap()),
     ];
 
     for (name, structure) in shapes {
         let mut key = None;
-        let t_keygen = once(|| key = Some(keygen(&seed, structure)));
+        let t_keygen = once(|| key = keygen(&seed, structure));
         let (sk, pk) = key.unwrap();
 
         // The first leaf, which is the smallest signature a shape produces.
@@ -63,7 +63,7 @@ fn main() {
     }
 
     // The fallback is the same whatever shape the stateful side has.
-    let (sk, pk) = keygen(&seed, Structure::balanced(5));
+    let (sk, pk) = keygen(&seed, Structure::balanced(5).unwrap()).unwrap();
     let mut fb = None;
     let t_sign = once(|| fb = sign(&msg, b"", &sk, None, None));
     let fb = fb.unwrap();
@@ -80,7 +80,7 @@ fn main() {
 
     // The largest stateful signature, at the deepest leaf of the deepest tree.
     let structure = Structure::unbalanced(255);
-    let (sk, pk) = keygen(&seed, structure);
+    let (sk, pk) = keygen(&seed, structure).unwrap();
     let last = structure.budget() - 1;
     let big = sign(&msg, b"", &sk, Some(last), None).unwrap();
     let t_verify = repeated(200, || assert!(verify(&msg, &big, b"", &pk)));
