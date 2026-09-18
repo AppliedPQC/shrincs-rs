@@ -59,7 +59,7 @@ transaction confirms.
 | | budget | signature |
 |---|---|---|
 | `Structure::unbalanced(d)` | `d + 1` | 548 B rising by 16 or 17 per signature |
-| `Structure::balanced(d)` | `2^d` | fixed, `530 + 18 + 16·d` bytes |
+| `Structure::balanced(d)` | `2^d` | fixed, `531 + 16·d + ⌈d/8⌉` bytes (612 at `d = 5`) |
 
 Shape does not change the cost at a given budget, only the size curve:
 unbalanced front-loads the small signatures, balanced flattens them. Exhausting
