@@ -1,6 +1,6 @@
 {
  "_source": "https://github.com/SHRINCS/shrincs-bip",
- "_commit": "97216c1310877a54e3027fa723194a7ea5d49d6d",
+ "_commit": "4cd63a6497a0ba7c5e99699b94d33973546d9e37",
  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
  "components": {
   "sha256_trunc16": "ba7816bf8f01cfea414140de5dae2223",
