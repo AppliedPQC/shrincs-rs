@@ -153,12 +153,11 @@ jobs:
 
       # The vectors in tests/kat.json must still be what the reference
       # produces, so a change upstream shows up here rather than silently
-      # leaving the crate tested against a stale copy.
+      # leaving the crate tested against a stale copy. Only the vectors are
+      # compared: upstream moving to a commit that produces the same ones
+      # passes, since the crate is then still tested against current values.
       - name: The committed vectors still match upstream
-        run: |
-          ./regenerate-kat.py --repo shrincs-bip
-          git diff --exit-code -- tests/kat.json \
-            || { echo "tests/kat.json is stale against upstream"; exit 1; }
+        run: ./regenerate-kat.py --repo shrincs-bip --check
 
       # Signing in the reference Python is seconds per stateless signature, so
       # the case count is kept low enough to stay inside a sensible CI budget.
