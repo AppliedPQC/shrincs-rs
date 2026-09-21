@@ -9,8 +9,9 @@ use shrincs::{hash::Sha256, params::*, Shrincs, Shrincs256, Structure};
 fn the_default_entry_points_are_the_specified_scheme() {
     assert_eq!(Shrincs256::HASH, "SHA-256");
     let seed = [1u8; SEED_SIZE];
-    let (sk_free, pk_free) = shrincs::keygen(&seed, Structure::balanced(2));
-    let (sk_expl, pk_expl) = Shrincs::<Sha256>::keygen(&seed, Structure::balanced(2));
+    let (sk_free, pk_free) = shrincs::keygen(&seed, Structure::balanced(2).unwrap()).unwrap();
+    let (sk_expl, pk_expl) =
+        Shrincs::<Sha256>::keygen(&seed, Structure::balanced(2).unwrap()).unwrap();
     assert_eq!(sk_free, sk_expl, "the free functions must be Shrincs256");
     assert_eq!(pk_free, pk_expl);
 }
@@ -25,7 +26,7 @@ mod blake3_suite {
     fn the_construction_works_over_a_different_primitive() {
         let seed = [2u8; SEED_SIZE];
         let structure = Structure::unbalanced(3);
-        let (sk, pk) = Alt::keygen(&seed, structure);
+        let (sk, pk) = Alt::keygen(&seed, structure).unwrap();
         assert_eq!(Alt::HASH, "BLAKE3");
 
         for c in 0..structure.budget() {
@@ -45,9 +46,9 @@ mod blake3_suite {
     #[test]
     fn a_different_suite_is_a_different_scheme() {
         let seed = [2u8; SEED_SIZE];
-        let structure = Structure::balanced(2);
-        let (sk_a, pk_a) = Shrincs256::keygen(&seed, structure);
-        let (sk_b, pk_b) = Alt::keygen(&seed, structure);
+        let structure = Structure::balanced(2).unwrap();
+        let (sk_a, pk_a) = Shrincs256::keygen(&seed, structure).unwrap();
+        let (sk_b, pk_b) = Alt::keygen(&seed, structure).unwrap();
 
         // Same seed, same shape, different keys: the suite reaches key derivation.
         assert_ne!(pk_a, pk_b, "public keys must differ between suites");

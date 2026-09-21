@@ -11,6 +11,7 @@ use crate::adrs::*;
 use crate::hash::{Hash, HashSuite};
 use crate::params::*;
 use crate::wots::{wots_c_pubkey_from_sig, wots_c_pubkey_gen, wots_c_sign};
+use crate::Structure;
 
 /// Shifting a `u64` by 64 or more is undefined in Rust but well defined in the
 /// specification's integer model, where the result is zero. FXMSS depths reach
@@ -38,7 +39,7 @@ fn is_leaf(structure: [u8; 2], node_depth: u32, node_index: u64) -> bool {
     }
 }
 
-pub fn fxmss_node<S: HashSuite>(
+pub(crate) fn fxmss_node<S: HashSuite>(
     sk_seed: &[u8],
     node_index: u64,
     node_height: u8,
@@ -52,6 +53,14 @@ pub fn fxmss_node<S: HashSuite>(
         adrs.zero_payload0().set_structure(structure);
         return wots_c_pubkey_gen::<S>(sk_seed, pk_seed, adrs);
     }
+    // Children sit at 2i and 2i+1, so this needs i < 2^63. A node recurses
+    // only above the leaves: in a balanced tree, capped at depth 63, that is
+    // depth 62 or shallower, index below 2^62; an unbalanced tree only ever
+    // uses indexes 0 and 1. `Structure` cannot hold anything else.
+    debug_assert!(
+        node_index < 1 << 63,
+        "FXMSS child index of {node_index} overflows a u64"
+    );
     let l = fxmss_node::<S>(
         sk_seed,
         2 * node_index,
@@ -73,7 +82,7 @@ pub fn fxmss_node<S: HashSuite>(
     S::h(pk_seed, adrs, &l, &r)
 }
 
-pub fn fxmss_sign<S: HashSuite>(
+pub(crate) fn fxmss_sign<S: HashSuite>(
     digest: &[u8],
     sk_seed: &[u8],
     leaf_index: u64,
@@ -136,9 +145,10 @@ pub fn fxmss_pubkey_from_sig<S: HashSuite>(
 
 /// Which leaf the state counter selects, as `(index, height)`. `None` means
 /// the budget is spent, which sends the signer to the stateless path rather
-/// than failing.
-pub fn leaf_select(structure: [u8; 2], state_ctr: u64) -> Option<(u64, u8)> {
-    let (shape, depth) = (structure[0], structure[1]);
+/// than failing. A balanced tree is at most 63 deep, so its bound `2^depth`
+/// is a plain `u64` with no width special case, and every leaf is reachable.
+pub fn leaf_select(structure: Structure, state_ctr: u64) -> Option<(u64, u8)> {
+    let (shape, depth) = (structure.0[0], structure.0[1]);
     if depth == 0 {
         return None;
     }
@@ -153,9 +163,34 @@ pub fn leaf_select(structure: [u8; 2], state_ctr: u64) -> Option<(u64, u8)> {
             }
         }
         FXMSS_SHAPE_BALANCED => {
-            let budget = if depth >= 64 { u64::MAX } else { 1u64 << depth };
-            (state_ctr < budget).then(|| (state_ctr, FXMSS_HEIGHT - depth))
+            (state_ctr < 1u64 << depth).then(|| (state_ctr, FXMSS_HEIGHT - depth))
         }
         _ => None,
+    }
+}
+
+// Debug-only as a whole, so release builds, which CI tests with warnings
+// denied, do not see the module's imports go unused.
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+    use crate::hash::Sha256;
+
+    /// The only way past the assertion is a structure `Structure` refuses to
+    /// hold: a balanced tree deeper than 63, recursing below depth 63. A
+    /// release build would wrap `2 * 2^63` to 0 and alias a subtree that does
+    /// not exist onto node 0; a debug build stops here. Debug-only, since in
+    /// release the call would instead start on 2^36 leaves.
+    #[test]
+    #[should_panic(expected = "overflows a u64")]
+    fn a_child_index_past_u64_is_caught() {
+        fxmss_node::<Sha256>(
+            &[0; 16],
+            1 << 63,
+            FXMSS_HEIGHT - 64,
+            &[0; 16],
+            [FXMSS_SHAPE_BALANCED, 100],
+            &mut Adrs::new(),
+        );
     }
 }

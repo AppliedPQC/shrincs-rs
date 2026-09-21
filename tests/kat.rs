@@ -56,8 +56,9 @@ fn keys_and_signatures_match_the_reference() {
 
     for case in k["cases"].as_array().unwrap() {
         let sf = hex(case["sf_structure"].as_str().unwrap());
-        let structure = Structure([sf[0], sf[1]]);
-        let (sk, pk) = keygen(&seed, structure);
+        let structure =
+            Structure::from_bytes([sf[0], sf[1]]).expect("KAT structures are well-formed");
+        let (sk, pk) = keygen(&seed, structure).unwrap();
         assert_eq!(
             sk.to_vec(),
             hex(case["seckey"].as_str().unwrap()),
@@ -92,7 +93,7 @@ fn keys_and_signatures_match_the_reference() {
 fn budget_exhaustion_falls_back_rather_than_failing() {
     let seed = [3u8; 48];
     let structure = Structure::unbalanced(4);
-    let (sk, pk) = keygen(&seed, structure);
+    let (sk, pk) = keygen(&seed, structure).unwrap();
     for c in 0..structure.budget() {
         let s = sign(b"m", b"", &sk, Some(c), None).unwrap();
         assert!(
@@ -113,7 +114,7 @@ fn budget_exhaustion_falls_back_rather_than_failing() {
 #[test]
 fn signature_sizes_follow_the_size_law() {
     let seed = [5u8; 48];
-    let (sk, _) = keygen(&seed, Structure::unbalanced(6));
+    let (sk, _) = keygen(&seed, Structure::unbalanced(6)).unwrap();
     for c in 0..7u64 {
         let d = (c + 1).min(6) as usize;
         let want = 1 + N + d.min(64).div_ceil(8) + 2 + WOTS_C_CHAINS_SIZE + d * N;
@@ -128,7 +129,7 @@ fn signature_sizes_follow_the_size_law() {
 #[test]
 fn tampering_is_rejected() {
     let seed = [9u8; 48];
-    let (sk, pk) = keygen(&seed, Structure::balanced(2));
+    let (sk, pk) = keygen(&seed, Structure::balanced(2).unwrap()).unwrap();
     for state in [Some(0u64), None] {
         let sig = sign(b"authentic", b"", &sk, state, None).unwrap();
         assert!(verify(b"authentic", &sig, b"", &pk));
@@ -142,7 +143,7 @@ fn tampering_is_rejected() {
                 "flipped bit in byte {i}"
             );
         }
-        let (_, other_pk) = keygen(&[10u8; 48], Structure::balanced(2));
+        let (_, other_pk) = keygen(&[10u8; 48], Structure::balanced(2).unwrap()).unwrap();
         assert!(!verify(b"authentic", &sig, b"", &other_pk), "wrong key");
     }
 }
@@ -158,7 +159,7 @@ fn tampering_is_rejected() {
 #[test]
 fn the_whole_message_is_signed_not_a_prefix() {
     let seed = [0x5au8; SEED_SIZE];
-    let (sk, pk) = keygen(&seed, Structure::balanced(1));
+    let (sk, pk) = keygen(&seed, Structure::balanced(1).unwrap()).unwrap();
 
     for mlen in [64usize, 80, 96, 112, 128, 256] {
         let msg: Vec<u8> = (0..mlen).map(|i| i as u8).collect();

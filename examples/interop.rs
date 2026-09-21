@@ -37,11 +37,13 @@ fn main() {
         match mode.as_str() {
             "sign" => {
                 let seed: [u8; 48] = hex(job["seed"].as_str().unwrap()).try_into().unwrap();
-                let structure = Structure([
+                let structure = Structure::from_bytes([
                     job["shape"].as_u64().unwrap() as u8,
                     job["depth"].as_u64().unwrap() as u8,
-                ]);
-                let (sk, pk): (SecretKey, PublicKey) = keygen(&seed, structure);
+                ])
+                .expect("interop sends well-formed structures");
+                let (sk, pk): (SecretKey, PublicKey) = keygen(&seed, structure)
+                    .expect("interop depths are within the default ceiling");
                 let ctr = job["ctr"].as_u64();
                 let opt_rand = job.get("opt_rand").and_then(|v| v.as_str()).map(hex);
                 let sig = sign(&msg, &ctx, &sk, ctr, opt_rand.as_deref());
