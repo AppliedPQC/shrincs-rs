@@ -35,7 +35,7 @@ Requires Python 3.11+ (the reference `shrincs.py` uses byteorder-less
 # from the crate root; clones shrincs-bip if --repo is omitted
 ./attack-59/reproduce.sh            # forge (k=4), then verify with shrincs-rs
 python3 attack-59/forge.py --repo /path/to/shrincs-bip --reuse-k 3
-cargo test --test forgery -- --ignored   # Rust-only, on the committed fixtures
+python3 attack-59/forge.py && cargo test --test forgery -- --ignored   # Rust check on the generated fixtures
 ```
 
 `forge.py` asserts the upstream `shrincs_verify` accepts the forgery and writes

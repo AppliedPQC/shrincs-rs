@@ -25,7 +25,11 @@ fn hex(s: &str) -> Vec<u8> {
 
 fn load(path: &str) -> (Vec<u8>, Vec<u8>, PublicKey, Vec<u8>) {
     let text = std::fs::read_to_string(path).expect("fixture present");
-    let job = &serde_json::from_str::<serde_json::Value>(&text).unwrap()[0];
+    parse(&text)
+}
+
+fn parse(text: &str) -> (Vec<u8>, Vec<u8>, PublicKey, Vec<u8>) {
+    let job = &serde_json::from_str::<serde_json::Value>(text).unwrap()[0];
     let f = |k: &str| hex(job[k].as_str().unwrap());
     let pk: PublicKey = f("pubkey").try_into().expect("48-byte key");
     (f("msg"), f("ctx"), pk, f("sig"))
@@ -34,6 +38,12 @@ fn load(path: &str) -> (Vec<u8>, Vec<u8>, PublicKey, Vec<u8>) {
 #[test]
 #[ignore = "documents the #59 forgery: asserts a forged signature verifies"]
 fn forged_signature_is_accepted() {
+    // Fixtures are generated, not committed. Run `attack-59/forge.py` (or
+    // `attack-59/reproduce.sh`) first; skip cleanly if they are absent.
+    if !std::path::Path::new("attack-59/forged-job.json").exists() {
+        eprintln!("skipped: run attack-59/forge.py to generate the fixtures first");
+        return;
+    }
     let (msg, ctx, pk, sig) = load("attack-59/forged-job.json");
     assert!(
         verify(&msg, &sig, &ctx, &pk),
