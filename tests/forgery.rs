@@ -39,6 +39,12 @@ fn forged_signature_is_accepted() {
         verify(&msg, &sig, &ctx, &pk),
         "forged signature on a never-signed message must verify, reproducing #59"
     );
+    // Control 1: the forgery under a different message must be rejected.
+    assert!(
+        !verify(b"a different never-signed message", &sig, &ctx, &pk),
+        "the forgery must not verify under a different message"
+    );
+    // Control 2: a one-bit tamper of the forgery must be rejected.
     let (cmsg, cctx, cpk, csig) = load("attack-59/control-job.json");
     assert!(
         !verify(&cmsg, &csig, &cctx, &cpk),

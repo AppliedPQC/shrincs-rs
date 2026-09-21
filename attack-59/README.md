@@ -28,6 +28,9 @@ not prevent the forgery.
 
 ## Run it
 
+Requires Python 3.11+ (the reference `shrincs.py` uses byteorder-less
+`int.to_bytes`/`from_bytes`, whose default was added in 3.11).
+
 ```sh
 # from the crate root; clones shrincs-bip if --repo is omitted
 ./attack-59/reproduce.sh            # forge (k=4), then verify with shrincs-rs

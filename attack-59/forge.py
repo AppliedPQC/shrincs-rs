@@ -36,16 +36,16 @@ def load(repo):
     return shrincs, commit
 
 def bound_message(S, ctx, sl_root, message):
-    return (0).to_bytes(1) + len(ctx).to_bytes(1) + ctx + sl_root + message
+    return (0).to_bytes(1, "big") + len(ctx).to_bytes(1, "big") + ctx + sl_root + message
 
 def adrs(lh, li):
-    A = bytearray(22); A[0] = lh; A[1:9] = li.to_bytes(8); return A
+    A = bytearray(22); A[0] = lh; A[1:9] = li.to_bytes(8, "big"); return A
 
 def parse_sf_sig(S, sig):
     lh = sig[0]; depth = S.FXMSS_HEIGHT - lh
     R = sig[1:17]; lisz = S.ceildiv(min(depth, 64), 8)
-    li = int.from_bytes(sig[17:17+lisz]); fx = sig[17+lisz:]
-    counter = int.from_bytes(fx[0:2])
+    li = int.from_bytes(sig[17:17+lisz], "big"); fx = sig[17+lisz:]
+    counter = int.from_bytes(fx[0:2], "big")
     cc = S.WOTS_C_CHAIN_COUNT
     chains = [fx[2+i*16:2+(i+1)*16] for i in range(cc)]
     auth = fx[2+cc*16:]
@@ -87,10 +87,10 @@ def forge(S, pubkey, ctx, reused_sigs, reused_msgs, target, report):
             # 3. Walk each owned node forward from m_i to c_i and reassemble.
             sig_chains = [b''] * cc
             for i in range(cc):
-                A[14:18] = i.to_bytes(4)
+                A[14:18] = i.to_bytes(4, "big")
                 sig_chains[i] = S.wots_c_chain_iter(owned[i], m[i], c[i]-m[i], pk_seed, A)
-            fx = counter.to_bytes(2) + b''.join(sig_chains) + auth
-            return bytes([lh]) + R + li.to_bytes(lisz) + fx
+            fx = counter.to_bytes(2, "big") + b''.join(sig_chains) + auth
+            return bytes([lh]) + R + li.to_bytes(lisz, "big") + fx
 
 def main():
     ap = argparse.ArgumentParser()
@@ -134,9 +134,13 @@ def main():
         if not ok:
             sys.exit("FORGERY FAILED against upstream Python")
 
-        # A 1-bit tamper of the forgery must be rejected (non-vacuous control).
+        # Non-vacuous controls: a 1-bit tamper of the forgery, and the forgery
+        # under a different never-signed message, must both be rejected.
         bad = bytearray(forged); bad[40] ^= 1
         assert not S.shrincs_verify(target, bytes(bad), ctx, pk)
+        other = b"a different never-signed message"
+        assert other != target
+        assert not S.shrincs_verify(other, forged, ctx, pk)
 
         meta = {"upstream_commit": commit, "reuse_k": args.reuse_k, "depth": args.depth}
         for name, sig in [("forged-job.json", forged), ("control-job.json", bytes(bad))]:
